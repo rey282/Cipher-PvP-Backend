@@ -2,15 +2,55 @@ import express  from 'express';
 import { Request, Response, NextFunction } from 'express';
 import cors     from 'cors';
 import dotenv   from 'dotenv';
+import rateLimit from 'express-rate-limit';
 import NodeCache from 'node-cache';
 import { pool } from './db';
+import helmet from 'helmet';
 
 dotenv.config();
+
+const requiredEnvs = ['DATABASE_URL'];
+
+for (const name of requiredEnvs) {
+  if (!process.env[name]) {
+    console.error(`❌ ${name} is missing in .env`);
+    process.exit(1);
+  }
+}
+
 const app  = express();
 const PORT = process.env.PORT || 3001;
 
-app.use(cors());
+//  Global: 100 requests per 15 minutes per IP
+const globalLimiter = rateLimit({
+  windowMs: 15 * 60 * 1000,
+  max: 100,
+  standardHeaders: true,
+  legacyHeaders: false,
+  message: { status: 429, error: 'Too many requests – please try again later.' }
+});
+
+//  Stricter: 30 requests per 15 minutes for /api/player/:id/matches
+const matchLimiter = rateLimit({
+  windowMs: 15 * 60 * 1000,
+  max: 30,
+  standardHeaders: true,
+  legacyHeaders: false,
+  message: { status: 429, error: 'Too many match requests – please slow down.' }
+});
+
+app.use(cors({
+  origin: [
+    'https://haya-pvp.vercel.app',
+    'http://localhost:5173'
+  ]
+}));
+
 app.use(express.json());
+
+app.use(globalLimiter);
+app.use(helmet()); 
+app.use(express.json({ limit: '1mb' }));
 
 /* one-hour cache */
 const cache = new NodeCache({ stdTTL: 60 * 60 });
@@ -218,7 +258,7 @@ app.get('/api/players', async (req, res) => {
 
 
 /* ─────────── /api/player/:id/summary ─────────── */
-app.get('/api/player/:id/summary', async (req, res) => {
+app.get('/api/player/:id/summary', matchLimiter , async (req, res) => {
   const playerId = req.params.id;
   const season   = seasonFromQuery(req.query.season);
   const mode     = String(req.query.mode || 'all');                       // NEW
@@ -347,98 +387,165 @@ app.get('/api/player/:id/summary', async (req, res) => {
 
 
 
-/* ─────────── /api/player/:id/matches ─────────── */
-app.get("/api/player/:id/matches", async (req, res) => {
+/* ─────────── /api/player/:id/matches  ─────────── */
+app.get('/api/player/:id/matches', matchLimiter, async (req, res) => {
   const playerId = req.params.id;
-  const limit    = Number(req.query.limit) || 15;
-  const mode     = String(req.query.mode || 'all');                                       // NEW
+  const limit    = Math.max(Number(req.query.limit)  || 15, 1);
+  const offset   = Math.max(Number(req.query.offset) || 0 , 0);
+  const mode     = String(req.query.mode || 'all');     // all / solo / duo
   const season   = seasonFromQuery(req.query.season);
-  const cacheKey = `player_matches_${playerId}_${limit}_${season.table || 'all'}_${mode}`; // NEW
 
-  const cached = cache.get(cacheKey);
-  if (cached) { res.json(cached); return; }
-
-  const dateClause = season.start ? `AND m.timestamp BETWEEN $3 AND $4` : '';
-  const params     = season.start
-      ? [playerId, limit, season.start, season.end ?? new Date().toISOString()]
-      : [playerId, limit];
-
-  const q = `
-    SELECT match_id, timestamp, raw_data
-      FROM matches m
-     WHERE m.has_character_data = TRUE
-       AND (
-         EXISTS (SELECT 1 FROM jsonb_array_elements(raw_data->'red_team')  t WHERE t->>'id' = $1)
-         OR EXISTS (SELECT 1 FROM jsonb_array_elements(raw_data->'blue_team') t WHERE t->>'id' = $1)
-       )
-       ${dateClause}
-  ORDER BY match_id DESC
-     LIMIT $2;`;
+  /* ---------- dynamic param indexes ---------- */
+  const params: any[] = [playerId]; // $1
+  let dateClause = '';
+  if (season.start) {
+    dateClause = `AND m.timestamp BETWEEN $2 AND $3`;
+    params.push(season.start, season.end ?? new Date().toISOString()); // $2, $3
+  }
+  const modeIdx   = params.length + 1;
+  const limitIdx  = modeIdx + 1;
+  const offsetIdx = modeIdx + 2;
+  params.push(mode, limit, offset);
 
   try {
-    const { rows } = await pool.query(q, params);
+    const countSQL = `
+      WITH player_matches AS (
+        SELECT
+          (
+            SELECT COUNT(*)
+            FROM jsonb_array_elements(
+              CASE
+                WHEN EXISTS (
+                  SELECT 1 FROM jsonb_array_elements(raw_data->'red_team') t
+                  WHERE t->>'id'=$1
+                ) THEN raw_data->'red_team'
+                ELSE raw_data->'blue_team'
+              END
+            ) elem
+            WHERE elem->>'id'=$1
+          ) AS self_count
+        FROM matches m
+        WHERE m.has_character_data = TRUE
+          AND (
+               EXISTS (SELECT 1 FROM jsonb_array_elements(raw_data->'red_team')  t WHERE t->>'id'=$1)
+            OR EXISTS (SELECT 1 FROM jsonb_array_elements(raw_data->'blue_team') t WHERE t->>'id'=$1)
+          )
+          ${dateClause}
+      )
+      SELECT COUNT(*)
+        FROM player_matches
+       WHERE (
+              $${modeIdx} = 'all'
+           OR ($${modeIdx} = 'solo' AND self_count > 1)
+           OR ($${modeIdx} = 'duo'  AND self_count = 1)
+       );
+    `;
+    const { rows: [cnt] } = await pool.query(countSQL, params.slice(0, modeIdx));
+    const total = Number(cnt?.count || 0);
+
+    const listSQL = `
+      WITH player_matches AS (
+        SELECT
+          match_id,
+          timestamp,
+          raw_data,
+          (
+            SELECT COUNT(*)
+            FROM jsonb_array_elements(
+              CASE
+                WHEN EXISTS (
+                  SELECT 1 FROM jsonb_array_elements(raw_data->'red_team') t
+                  WHERE t->>'id'=$1
+                ) THEN raw_data->'red_team'
+                ELSE raw_data->'blue_team'
+              END
+            ) elem
+            WHERE elem->>'id'=$1
+          ) AS self_count
+        FROM matches m
+        WHERE m.has_character_data = TRUE
+          AND (
+               EXISTS (SELECT 1 FROM jsonb_array_elements(raw_data->'red_team')  t WHERE t->>'id'=$1)
+            OR EXISTS (SELECT 1 FROM jsonb_array_elements(raw_data->'blue_team') t WHERE t->>'id'=$1)
+          )
+          ${dateClause}
+      )
+      SELECT match_id, timestamp, raw_data
+        FROM player_matches
+        WHERE (
+              $${modeIdx} = 'all'
+           OR ($${modeIdx} = 'solo' AND self_count > 1)
+           OR ($${modeIdx} = 'duo'  AND self_count = 1)
+        )
+      ORDER BY match_id DESC
+      LIMIT  $${limitIdx}
+      OFFSET $${offsetIdx};
+    `;
+
+    const { rows } = await pool.query(listSQL, params);
 
     const matches = rows.map((r: any) => {
       const rd = r.raw_data;
-      const isRed   = rd.red_team.some((m: any) => m.id === playerId);
-      const myTeam  = isRed ? 'red'  : 'blue';
+      const isRed = rd.red_team.some((m: any) => m.id === playerId);
+      const myTeam = isRed ? 'red' : 'blue';
       const oppTeam = isRed ? 'blue' : 'red';
 
-      const uniq = (arr: any[]) => [...new Set(arr)];
-      const teammateNames = uniq(
-        rd[`${myTeam}_team`].filter((m: any) => m.id !== playerId).map((m: any) => m.name));
+      const uniq = <T>(arr: T[]) => [...new Set(arr)];
+      const teammateNames = uniq(rd[`${myTeam}_team`].filter((m: any) => m.id !== playerId).map((m: any) => m.name));
       const opponentNames = uniq(rd[`${oppTeam}_team`].map((m: any) => m.name));
 
-      const dateISO =
-        rd.date && !isNaN(Date.parse(rd.date))
-          ? new Date(rd.date).toISOString()
-          : r.timestamp?.toISOString();
+      const dateISO = rd.date && !isNaN(Date.parse(rd.date)) ? new Date(rd.date).toISOString() : r.timestamp?.toISOString();
 
-      const myBansRaw  = [...(rd[`${myTeam}_bans`]  || [])];
+      const myBansRaw = [...(rd[`${myTeam}_bans`] || [])];
       const oppBansRaw = [...(rd[`${oppTeam}_bans`] || [])];
       if (myBansRaw.length > 1 && oppBansRaw.length > 1) {
-        const tmp = myBansRaw[1]; myBansRaw[1] = oppBansRaw[1]; oppBansRaw[1] = tmp;
+        const tmp = myBansRaw[1];
+        myBansRaw[1] = oppBansRaw[1];
+        oppBansRaw[1] = tmp;
       }
 
-      const myCycles       = rd[`${myTeam}_team`].map((m: any) => m.cycles || 0);
-      const oppCycles      = rd[`${oppTeam}_team`].map((m: any) => m.cycles || 0);
-      const myCyclePenalty = isRed ? rd.red_penalty  || 0 : rd.blue_penalty || 0;
-      const oppCyclePenalty= isRed ? rd.blue_penalty || 0 : rd.red_penalty  || 0;
+      const myCycles = rd[`${myTeam}_team`].map((m: any) => m.cycles || 0);
+      const oppCycles = rd[`${oppTeam}_team`].map((m: any) => m.cycles || 0);
+      const myCyclePenalty = isRed ? rd.red_penalty || 0 : rd.blue_penalty || 0;
+      const oppCyclePenalty = isRed ? rd.blue_penalty || 0 : rd.red_penalty || 0;
 
       return {
-        matchId : r.match_id,
-        date    : dateISO,
-        result  : rd.winner === myTeam ? 'win' : 'lose',
+        matchId: r.match_id,
+        date: dateISO,
+        result: rd.winner === myTeam ? 'win' : 'lose',
         teammateNames,
         opponentNames,
-        myPicks : (rd[`${myTeam}_picks`] || []).map((c: any) => c.code),
+        myPicks: (rd[`${myTeam}_picks`] || []).map((c: any) => c.code),
         oppPicks: (rd[`${oppTeam}_picks`] || []).map((c: any) => c.code),
-        myBans  : myBansRaw.map((b: any) => b.code),
-        oppBans : oppBansRaw.map((b: any) => b.code),
-        prebans : rd.prebans || [],
-        jokers  : rd.jokers  || [],
-        myCycles, oppCycles,
-        myCyclePenalty, oppCyclePenalty
+        myBans: myBansRaw.map((b: any) => b.code),
+        oppBans: oppBansRaw.map((b: any) => b.code),
+        prebans: rd.prebans || [],
+        jokers: rd.jokers || [],
+        myCycles,
+        oppCycles,
+        myCyclePenalty,
+        oppCyclePenalty
       };
     });
 
-    const filteredMatches = matches.filter(m =>
-      mode === 'solo' ? m.teammateNames.length === 0
-    : mode === 'duo'  ? m.teammateNames.length  > 0
-    : true);
-
-    const response = {
-      data: filteredMatches,
+    res.json({
+      data: matches,
+      total,
       lastFetched: new Date().toISOString(),
       seasonLabel: season.label
-    };
-
-    cache.set(cacheKey, response);
-    res.json(response);
+    });
   } catch (err) {
-    console.error("DB error (player matches)", err);
-    res.status(500).json({ error: "Failed to fetch matches" });
+    console.error('DB error (player matches)', err);
+    res.status(500).json({ error: 'Failed to fetch matches' });
   }
+});
+
+
+
+
+/* 404 fallback */
+app.use((_, res, _next) => {
+  res.status(404).json({ error: 'Not Found' });
 });
 
 /* ─────────── start ─────────── */
