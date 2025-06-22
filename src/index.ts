@@ -1,5 +1,4 @@
 import express  from 'express';
-import { Request, Response, NextFunction } from 'express';
 import cors     from 'cors';
 import dotenv   from 'dotenv';
 import rateLimit from 'express-rate-limit';
