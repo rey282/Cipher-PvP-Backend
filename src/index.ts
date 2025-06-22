@@ -6,6 +6,7 @@ import NodeCache from 'node-cache';
 import { pool } from './db';
 import helmet from 'helmet';
 
+
 dotenv.config();
 
 const requiredEnvs = ['DATABASE_URL'];
@@ -18,6 +19,7 @@ for (const name of requiredEnvs) {
 }
 
 const app  = express();
+app.set('trust proxy', 1);
 const PORT = process.env.PORT || 3001;
 
 //  Global: 100 requests per 15 minutes per IP
@@ -44,8 +46,6 @@ app.use(cors({
     'http://localhost:5173'
   ]
 }));
-
-app.use(express.json());
 
 app.use(globalLimiter);
 app.use(helmet()); 
