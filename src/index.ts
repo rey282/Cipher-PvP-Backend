@@ -540,8 +540,10 @@ app.get('/api/player/:id/matches', matchLimiter, async (req, res) => {
   }
 });
 
-
-
+/* ─────────── health check ─────────── */
+app.get("/ping", (req, res) => {
+  res.status(200).send("pong");
+});
 
 /* 404 fallback */
 app.use((_, res, _next) => {
