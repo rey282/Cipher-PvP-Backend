@@ -19,6 +19,7 @@ for (const name of requiredEnvs) {
 }
 
 const app  = express();
+// Enable 'trust proxy' so Express correctly identifies client IPs when running behind a proxy (e.g., in production or on Vercel)
 app.set('trust proxy', 1);
 const PORT = process.env.PORT || 3001;
 
@@ -31,10 +32,10 @@ const globalLimiter = rateLimit({
   message: { status: 429, error: 'Too many requests – please try again later.' }
 });
 
-//  Stricter: 30 requests per 15 minutes for /api/player/:id/matches
+//  Stricter: 20 requests per 15 minutes for /api/player/:id/matches
 const matchLimiter = rateLimit({
   windowMs: 15 * 60 * 1000,
-  max: 30,
+  max: 20,
   standardHeaders: true,
   legacyHeaders: false,
   message: { status: 429, error: 'Too many match requests – please slow down.' }
