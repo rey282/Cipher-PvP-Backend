@@ -35,7 +35,7 @@ const globalLimiter = rateLimit({
 //  Stricter: 20 requests per 15 minutes for /api/player/:id/matches
 const matchLimiter = rateLimit({
   windowMs: 15 * 60 * 1000,
-  max: 20,
+  max: 15,
   standardHeaders: true,
   legacyHeaders: false,
   message: { status: 429, error: 'Too many match requests – please slow down.' }
