@@ -357,11 +357,23 @@ app.get('/api/player/:id/summary', matchLimiter , async (req, res) => {
         typeof code === "string" &&
         /^[a-z]+$/i.test(code);
 
-      (rd[`${team}_bans`] || []).forEach((b: any) => {
+      // Fix flipped second bans before counting
+      const myBansRaw  = [...(rd[`${team}_bans`] || [])];
+      const oppTeam    = team === 'red' ? 'blue' : 'red';
+      const oppBansRaw = [...(rd[`${oppTeam}_bans`] || [])];
+
+      if (myBansRaw.length > 1 && oppBansRaw.length > 1) {
+        const tmp = myBansRaw[1];
+        myBansRaw[1] = oppBansRaw[1];
+        oppBansRaw[1] = tmp;
+      }
+
+      myBansRaw.forEach((b: any) => {
         if (isValidCode(b.code)) {
           banCounts[b.code] = (banCounts[b.code] || 0) + 1;
         }
       });
+
       (rd.prebans || []).forEach((code: any) => {
         if (isValidCode(code)) {
           banCounts[code] = (banCounts[code] || 0) + 1;
