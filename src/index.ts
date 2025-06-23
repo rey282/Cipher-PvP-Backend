@@ -1,16 +1,17 @@
-import express  from 'express';
-import cors     from 'cors';
-import dotenv   from 'dotenv';
+import express from 'express';
+import cors from 'cors';
+import dotenv from 'dotenv';
 import rateLimit from 'express-rate-limit';
 import NodeCache from 'node-cache';
-import { pool } from './db';
 import helmet from 'helmet';
-
+import session from 'express-session';
+import passport from 'passport';
+import { discordAuthRouter } from './auth/discord';
+import { pool } from './db';
 
 dotenv.config();
 
-const requiredEnvs = ['DATABASE_URL'];
-
+const requiredEnvs = ['DATABASE_URL', 'SESSION_SECRET'];
 for (const name of requiredEnvs) {
   if (!process.env[name]) {
     console.error(`❌ ${name} is missing in .env`);
@@ -18,12 +19,13 @@ for (const name of requiredEnvs) {
   }
 }
 
-const app  = express();
-// Enable 'trust proxy' so Express correctly identifies client IPs when running behind a proxy (e.g., in production or on Vercel)
+const app = express();
 app.set('trust proxy', 1);
 const PORT = process.env.PORT || 3001;
 
-//  Global: 100 requests per 15 minutes per IP
+const isProd = process.env.NODE_ENV === 'production';
+
+// ───── Rate limiting ─────
 const globalLimiter = rateLimit({
   windowMs: 15 * 60 * 1000,
   max: 100,
@@ -31,8 +33,6 @@ const globalLimiter = rateLimit({
   legacyHeaders: false,
   message: { status: 429, error: 'Too many requests – please try again later.' }
 });
-
-//  Stricter: 20 requests per 15 minutes for /api/player/:id/matches
 const matchLimiter = rateLimit({
   windowMs: 15 * 60 * 1000,
   max: 15,
@@ -41,18 +41,57 @@ const matchLimiter = rateLimit({
   message: { status: 429, error: 'Too many match requests – please slow down.' }
 });
 
+// ───── Middleware ─────
 app.use(cors({
-  origin: [
-    'https://www.cipher.uno',
-    'https://cipher.uno', 
-    'https://haya-pvp.vercel.app', 
-    'http://localhost:5173'        
-  ]
+  origin: (origin, callback) => {
+    if (!origin) return callback(null, true); 
+
+    const allowedDomains = [
+      'localhost:5173',
+      'haya-pvp.vercel.app',
+    ];
+
+    const url = new URL(origin);
+    if (
+      url.hostname.endsWith('.cipher.uno') ||             
+      url.hostname === 'cipher.uno' ||
+      allowedDomains.includes(url.hostname)
+    ) {
+      callback(null, true);
+    } else {
+      callback(new Error('Not allowed by CORS'));
+    }
+  },
+  credentials: true,
 }));
 
+/* ───── Sessions ───── */
+app.use(session({
+  name: 'cid',
+  secret: process.env.SESSION_SECRET!,
+  resave: false,
+  saveUninitialized: false,
+  cookie: {
+    httpOnly: true,
+    secure: isProd,
+    sameSite: isProd ? 'none' : 'lax',
+    maxAge: 365 * 24 * 60 * 60 * 1000, 
+    domain: isProd ? '.cipher.uno' : undefined,  
+  }
+}));
+
+
+/* ───── Passport init + session ───── */
+app.use(passport.initialize());
+app.use(passport.session());
+
 app.use(globalLimiter);
-app.use(helmet()); 
+app.use(helmet());
 app.use(express.json({ limit: '1mb' }));
+
+// ───── New auth routes ─────
+app.use('/auth', discordAuthRouter);
+
 
 /* one-hour cache */
 const cache = new NodeCache({ stdTTL: 60 * 60 });
@@ -271,11 +310,13 @@ app.get('/api/player/:id/summary', matchLimiter , async (req, res) => {
 
   try {
     const userRes = await pool.query(
-      `SELECT COALESCE(d.username, p.nickname) AS username
+      `SELECT COALESCE(d.username, p.nickname) AS username, p.avatar
          FROM players p
     LEFT JOIN discord_usernames d ON p.discord_id = d.discord_id
         WHERE p.discord_id = $1`, [playerId]);
-    const username = userRes.rows[0]?.username || "Unknown";
+    const userRow = userRes.rows[0] || {};
+    const username = userRow.username || "Unknown";
+    const avatar = userRow.avatar || null;
 
     const dateClause = season.start ? `AND m.timestamp BETWEEN $2 AND $3` : '';
     const params     = season.start
@@ -371,6 +412,7 @@ app.get('/api/player/:id/summary', matchLimiter , async (req, res) => {
     const summary = {
       playerId,
       username,
+      avatar,
       mostPicked   : addInfo(mostPicked),
       mostBanned   : addInfo(mostBanned),
       bestWinRate  : addInfo(bestWR),
