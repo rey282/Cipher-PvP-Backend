@@ -353,15 +353,26 @@ app.get('/api/player/:id/summary', matchLimiter , async (req, res) => {
       const isRed = rd.red_team.some((m: any) => m.id === playerId);
       const team  = isRed ? 'red' : 'blue';
 
+      const isValidCode = (code: any) =>
+        typeof code === "string" &&
+        /^[a-z]+$/i.test(code);
+
       (rd[`${team}_bans`] || []).forEach((b: any) => {
-        banCounts[b.code] = (banCounts[b.code] || 0) + 1;
+        if (isValidCode(b.code)) {
+          banCounts[b.code] = (banCounts[b.code] || 0) + 1;
+        }
       });
-      (rd.prebans || []).forEach((code: string) => {
-        banCounts[code] = (banCounts[code] || 0) + 1;
+      (rd.prebans || []).forEach((code: any) => {
+        if (isValidCode(code)) {
+          banCounts[code] = (banCounts[code] || 0) + 1;
+        }
       });
-      (rd.jokers || []).forEach((code: string) => {
-        banCounts[code] = (banCounts[code] || 0) + 1;
+      (rd.jokers || []).forEach((code: any) => {
+        if (isValidCode(code)) {
+          banCounts[code] = (banCounts[code] || 0) + 1;
+        }
       });
+
 
       const teamWon = rd.winner === team;
       (rd[`${team}_picks`] || []).forEach((p: any) => {
