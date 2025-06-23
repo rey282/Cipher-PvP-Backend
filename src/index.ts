@@ -43,8 +43,10 @@ const matchLimiter = rateLimit({
 
 app.use(cors({
   origin: [
-    'https://haya-pvp.vercel.app',
-    'http://localhost:5173'
+    'https://www.cipher.uno',
+    'https://cipher.uno', 
+    'https://haya-pvp.vercel.app', 
+    'http://localhost:5173'        
   ]
 }));
 
