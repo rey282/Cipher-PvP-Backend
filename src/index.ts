@@ -5,6 +5,7 @@ import rateLimit from 'express-rate-limit';
 import NodeCache from 'node-cache';
 import helmet from 'helmet';
 import session from 'express-session';
+import pgSession from 'connect-pg-simple';
 import passport from 'passport';
 import { discordAuthRouter } from './auth/discord';
 import { pool } from './db';
@@ -65,9 +66,14 @@ app.use(cors({
   credentials: true,
 }));
 
-/* ───── Sessions ───── */
+/* ───── Sessions (PostgreSQL-backed) ───── */
+const PgSession = pgSession(session);
 app.use(session({
   name: 'cid',
+  store: new PgSession({
+    pool, // your existing PG pool
+    tableName: 'session'
+  }),
   secret: process.env.SESSION_SECRET!,
   resave: false,
   saveUninitialized: false,
@@ -75,11 +81,10 @@ app.use(session({
     httpOnly: true,
     secure: isProd,
     sameSite: isProd ? 'none' : 'lax',
-    maxAge: 365 * 24 * 60 * 60 * 1000, 
-    domain: isProd ? '.cipher.uno' : undefined,  
+    maxAge: 365 * 24 * 60 * 60 * 1000,
+    domain: isProd ? '.cipher.uno' : undefined,
   }
 }));
-
 
 /* ───── Passport init + session ───── */
 app.use(passport.initialize());
@@ -92,9 +97,9 @@ app.use(express.json({ limit: '1mb' }));
 // ───── New auth routes ─────
 app.use('/auth', discordAuthRouter);
 
-
 /* one-hour cache */
 const cache = new NodeCache({ stdTTL: 60 * 60 });
+
 
 /* ═════════════════════════════════════════════════════════════════════╗
    ║                      ➤ NEW / SEASONS (CONFIG)                     ║
