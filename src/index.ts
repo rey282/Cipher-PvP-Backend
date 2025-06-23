@@ -344,47 +344,51 @@ app.get('/api/player/:id/summary', matchLimiter , async (req, res) => {
     });
 
     const pickCounts: Record<string, number> = {};
-    const banCounts : Record<string, number> = {};
+    const bansMade: Record<string, number> = {};
+    const bansAgainst: Record<string, number> = {};
     const charWins  : Record<string, number> = {};
     const charPlays : Record<string, number> = {};
     let   fifteenC  = 0;
 
     for (const { raw_data: rd } of filteredRows) {
-      const isRed = rd.red_team.some((m: any) => m.id === playerId);
-      const team  = isRed ? 'red' : 'blue';
+      const isRed   = rd.red_team.some((m: any) => m.id === playerId);
+      const team    = isRed ? "red" : "blue";
+      const oppTeam = isRed ? "blue" : "red";
 
+      // helper – alphabetic codes only
       const isValidCode = (code: any) =>
-        typeof code === "string" &&
-        /^[a-z]+$/i.test(code);
+        typeof code === "string" && /^[a-z]+$/i.test(code);
 
-      // Fix flipped second bans before counting
+      // Reconstruct and fix swapped bans
       const myBansRaw  = [...(rd[`${team}_bans`] || [])];
-      const oppTeam    = team === 'red' ? 'blue' : 'red';
       const oppBansRaw = [...(rd[`${oppTeam}_bans`] || [])];
 
-      if (myBansRaw.length > 1 && oppBansRaw.length > 1) {
-        const tmp = myBansRaw[1];
-        myBansRaw[1] = oppBansRaw[1];
-        oppBansRaw[1] = tmp;
-      }
-
+      // Your team’s bans
       myBansRaw.forEach((b: any) => {
         if (isValidCode(b.code)) {
-          banCounts[b.code] = (banCounts[b.code] || 0) + 1;
+          bansMade[b.code] = (bansMade[b.code] || 0) + 1;
         }
       });
 
+      // Opponent’s bans (against you)
+      oppBansRaw.forEach((b: any) => {
+        if (isValidCode(b.code)) {
+          bansAgainst[b.code] = (bansAgainst[b.code] || 0) + 1;
+        }
+      });
+
+
+      // Prebans and jokers → apply to bansAgainst (they affect both teams equally)
       (rd.prebans || []).forEach((code: any) => {
         if (isValidCode(code)) {
-          banCounts[code] = (banCounts[code] || 0) + 1;
+          bansAgainst[code] = (bansAgainst[code] || 0) + 1;
         }
       });
       (rd.jokers || []).forEach((code: any) => {
         if (isValidCode(code)) {
-          banCounts[code] = (banCounts[code] || 0) + 1;
+          bansAgainst[code] = (bansAgainst[code] || 0) + 1;
         }
       });
-
 
       const teamWon = rd.winner === team;
       (rd[`${team}_picks`] || []).forEach((p: any) => {
@@ -402,7 +406,8 @@ app.get('/api/player/:id/summary', matchLimiter , async (req, res) => {
         .map(([code, count]) => ({ code, count }));
 
     const mostPicked = topN(pickCounts);
-    const mostBanned = topN(banCounts);
+    const mostBanned = topN(bansMade);
+    const mostBannedAgainst = topN(bansAgainst);
 
     const MIN_GAMES = 10;
     const wrArr = Object.keys(charPlays)
@@ -417,11 +422,12 @@ app.get('/api/player/:id/summary', matchLimiter , async (req, res) => {
     const worstWR = [...wrArr].sort((a, b) => a.winRate - b.winRate).slice(0, 3);
 
     const allCodes = [
-      ...mostPicked.map(c => c.code),
-      ...mostBanned.map(c => c.code),
-      ...bestWR.map(c => c.code),
-      ...worstWR.map(c => c.code)
-    ];
+    ...mostPicked.map(c => c.code),
+    ...mostBanned.map(c => c.code),
+    ...mostBannedAgainst.map(c => c.code),
+    ...bestWR.map(c => c.code),
+    ...worstWR.map(c => c.code)
+  ];
 
     const charMap: Record<string, { name: string; image_url: string }> = {};
     if (allCodes.length) {
@@ -437,7 +443,8 @@ app.get('/api/player/:id/summary', matchLimiter , async (req, res) => {
       username,
       avatar,
       mostPicked   : addInfo(mostPicked),
-      mostBanned   : addInfo(mostBanned),
+      mostBanned: addInfo(mostBanned),               // ← bans made by this player
+      mostBannedAgainst: addInfo(mostBannedAgainst), // ← bans made against this player
       bestWinRate  : addInfo(bestWR),
       worstWinRate : addInfo(worstWR),
       fifteenCycles: fifteenC,
