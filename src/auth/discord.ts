@@ -91,18 +91,30 @@ router.get(
   passport.authenticate("discord", { failureRedirect: process.env.FRONTEND_HOME_URL }),
   (req: Request, res: Response) => {
     const session = req.session as typeof req.session & { oauthRedirect?: string };
-
-    const rawPath  = session.oauthRedirect || "/";
+    const rawRedirect = session.oauthRedirect;
     delete session.oauthRedirect;
 
-    // Ensure leading slash, then prepend frontend origin
-    const redirectUrl =
-      `${process.env.FRONTEND_HOME_URL!.replace(/\/+$/, "")}` +
-      `${rawPath.startsWith("/") ? rawPath : `/${rawPath}`}`;
+    // Add a safety fallback
+    let finalUrl = process.env.FRONTEND_HOME_URL!;
 
-    res.redirect(redirectUrl);
+    // Only use rawRedirect if it's defined and passes validation
+    if (typeof rawRedirect === "string") {
+      try {
+        const url = new URL(rawRedirect);
+        if (url.hostname.endsWith(".cipher.uno")) {
+          finalUrl = rawRedirect;
+        }
+      } catch (err) {
+        console.warn("⚠ Invalid redirect URL:", rawRedirect);
+        // Fallback stays as FRONTEND_HOME_URL
+      }
+    }
+
+    console.log("🔁 Final redirect to:", finalUrl);
+    res.redirect(finalUrl);
   }
 );
+
 
 
 router.get("/me", async (req: Request, res: Response): Promise<void> => {
