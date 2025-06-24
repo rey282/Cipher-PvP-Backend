@@ -88,9 +88,13 @@ router.get("/discord", (req, res, next) => {
 
 router.get(
   "/discord/callback",
-  passport.authenticate("discord", { failureRedirect: process.env.FRONTEND_HOME_URL }),
+  passport.authenticate("discord", {
+    failureRedirect: process.env.FRONTEND_HOME_URL,
+  }),
   (req: Request, res: Response) => {
-    const session = req.session as typeof req.session & { oauthRedirect?: string };
+    const session = req.session as typeof req.session & {
+      oauthRedirect?: string;
+    };
     const rawRedirect = session.oauthRedirect;
     delete session.oauthRedirect;
 
@@ -98,23 +102,36 @@ router.get(
 
     if (typeof rawRedirect === "string") {
       try {
-        const url = new URL(rawRedirect); // if it fails, it’s not a full URL
+        // If it's a full URL
+        const url = new URL(rawRedirect);
+        const hostname = url.hostname;
+
         const allowed = ["cipher.uno", "draft.cipher.uno"];
-        if (allowed.some(domain => url.hostname === domain || url.hostname.endsWith("." + domain))) {
+        const isAllowed = allowed.some(
+          domain =>
+            hostname === domain || hostname.endsWith("." + domain)
+        );
+
+        if (isAllowed) {
           finalUrl = rawRedirect;
+        } else {
+          console.warn("❌ Rejected unsafe domain in redirect:", hostname);
         }
       } catch {
-        // optional: allow relative paths like "/players"
+        // If it's a relative path like "/players"
         if (rawRedirect.startsWith("/")) {
-          finalUrl = process.env.FRONTEND_HOME_URL!.replace(/\/+$/, "") + rawRedirect;
+          finalUrl = `${process.env.FRONTEND_HOME_URL!.replace(/\/+$/, "")}${rawRedirect}`;
+        } else {
+          console.warn("❌ Invalid redirect path format:", rawRedirect);
         }
       }
     }
 
-    console.log("🔁 Redirecting to:", finalUrl);
+    console.log("🔁 Final redirect to:", finalUrl);
     res.redirect(finalUrl);
   }
 );
+
 
 
 
