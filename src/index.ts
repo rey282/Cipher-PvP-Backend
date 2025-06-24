@@ -304,116 +304,147 @@ app.get('/api/players', async (req, res) => {
 
 
 /* ─────────── /api/player/:id/summary ─────────── */
-app.get('/api/player/:id/summary', matchLimiter , async (req, res) => {
+app.get("/api/player/:id/summary", matchLimiter, async (req, res) => {
   const playerId = req.params.id;
   const season   = seasonFromQuery(req.query.season);
-  const mode     = String(req.query.mode || 'all');                       // NEW
-  const cacheKey = `player_summary_${playerId}_${season.table || 'all'}_${mode}`; // NEW
+  const mode     = String(req.query.mode || "all");  // all / solo / duo
+  const cacheKey = `player_summary_${playerId}_${season.table || "all"}_${mode}`;
 
   const cached = cache.get(cacheKey);
-  if (cached) { res.json(cached); return; }
+  if (cached) {
+    res.json(cached);
+    return;
+  }
 
   try {
+    /* ---------- 1. basic user info (name + avatar) ---------- */
     const userRes = await pool.query(
       `SELECT COALESCE(d.username, p.nickname) AS username, p.avatar
          FROM players p
     LEFT JOIN discord_usernames d ON p.discord_id = d.discord_id
-        WHERE p.discord_id = $1`, [playerId]);
+        WHERE p.discord_id = $1`,
+      [playerId]
+    );
     const userRow = userRes.rows[0] || {};
     const username = userRow.username || "Unknown";
-    const avatar = userRow.avatar || null;
+    const avatar   = userRow.avatar   || null;
 
-    const dateClause = season.start ? `AND m.timestamp BETWEEN $2 AND $3` : '';
-    const params     = season.start
+    /* ---------- 2. fetch raw matches for this player ---------- */
+    const dateClause = season.start
+      ? `AND m.timestamp BETWEEN $2 AND $3`
+      : "";
+    const params = season.start
       ? [playerId, season.start, season.end ?? new Date().toISOString()]
       : [playerId];
 
-    const matchRes = await pool.query(`
+    const matchRes = await pool.query(
+      `
       SELECT raw_data
         FROM matches m
        WHERE m.has_character_data = TRUE
          AND (
-           EXISTS (SELECT 1 FROM jsonb_array_elements(raw_data->'red_team')  t WHERE t->>'id' = $1)
-           OR  EXISTS (SELECT 1 FROM jsonb_array_elements(raw_data->'blue_team') t WHERE t->>'id' = $1)
+              EXISTS (SELECT 1 FROM jsonb_array_elements(raw_data->'red_team')  t WHERE t->>'id' = $1)
+           OR EXISTS (SELECT 1 FROM jsonb_array_elements(raw_data->'blue_team') t WHERE t->>'id' = $1)
          )
          ${dateClause};
-    `, params);
+      `,
+      params
+    );
 
+    /* ---------- 3. filter matches by solo / duo / all ---------- */
     const filteredRows = matchRes.rows.filter(({ raw_data }) => {
-      const isRed = raw_data.red_team.some((m: any) => m.id === playerId);
-      const myTeam = raw_data[isRed ? 'red_team' : 'blue_team'];
+      const isRed  = raw_data.red_team.some((m: any) => m.id === playerId);
+      const myTeam = raw_data[isRed ? "red_team" : "blue_team"];
       const mates  = myTeam.filter((m: any) => m.id !== playerId);
-      return mode === 'solo' ? mates.length === 0
-           : mode === 'duo'  ? mates.length  > 0
-           : true;
+      return mode === "solo"
+        ? mates.length === 0
+        : mode === "duo"
+        ? mates.length > 0
+        : true;
     });
 
-    const pickCounts: Record<string, number> = {};
-    const bansMade: Record<string, number> = {};
-    const bansAgainst: Record<string, number> = {};
-    const charWins  : Record<string, number> = {};
-    const charPlays : Record<string, number> = {};
-    let   fifteenC  = 0;
+    /* ---------- 4. aggregation buckets ---------- */
+    const pickCounts       : Record<string, number> = {};
+    const bansMade         : Record<string, number> = {};
+    const bansAgainst      : Record<string, number> = {};
+    const prebansMade      : Record<string, number> = {};
+    const jokersMade       : Record<string, number> = {};
+    const charWins         : Record<string, number> = {};
+    const charPlays        : Record<string, number> = {};
+    let   fifteenCyclesCnt = 0;
+
+    /* ---------- 5. crunch each match ---------- */
+    const isValidCode = (code: any) =>
+      typeof code === "string" && /^[a-z]+$/i.test(code);
 
     for (const { raw_data: rd } of filteredRows) {
       const isRed   = rd.red_team.some((m: any) => m.id === playerId);
-      const team    = isRed ? "red" : "blue";
+      const team    = isRed ? "red"  : "blue";
       const oppTeam = isRed ? "blue" : "red";
 
-      // helper – alphabetic codes only
-      const isValidCode = (code: any) =>
-        typeof code === "string" && /^[a-z]+$/i.test(code);
-
-      // Reconstruct and fix swapped bans
-      const myBansRaw  = [...(rd[`${team}_bans`] || [])];
+      /* ----- fix: swap only 2nd ban if present ----- */
+      const myBansRaw  = [...(rd[`${team}_bans`]    || [])];
       const oppBansRaw = [...(rd[`${oppTeam}_bans`] || [])];
+      if (myBansRaw.length > 1 && oppBansRaw.length > 1) {
+        const tmp = myBansRaw[1];
+        myBansRaw[1]  = oppBansRaw[1];
+        oppBansRaw[1] = tmp;
+      }
 
-      // Your team’s bans
+      /* ----- your team’s bans ----- */
       myBansRaw.forEach((b: any) => {
-        if (isValidCode(b.code)) {
+        if (isValidCode(b.code))
           bansMade[b.code] = (bansMade[b.code] || 0) + 1;
-        }
       });
 
-      // Opponent’s bans (against you)
+      /* ----- opponent’s bans against you ----- */
       oppBansRaw.forEach((b: any) => {
-        if (isValidCode(b.code)) {
+        if (isValidCode(b.code))
           bansAgainst[b.code] = (bansAgainst[b.code] || 0) + 1;
-        }
       });
 
-
-      // Prebans and jokers → apply to bansAgainst (they affect both teams equally)
+      /* ----- track prebans & jokers separately ----- */
       (rd.prebans || []).forEach((code: any) => {
-        if (isValidCode(code)) {
-          bansAgainst[code] = (bansAgainst[code] || 0) + 1;
-        }
+        if (isValidCode(code))
+          prebansMade[code] = (prebansMade[code] || 0) + 1;
       });
       (rd.jokers || []).forEach((code: any) => {
-        if (isValidCode(code)) {
-          bansAgainst[code] = (bansAgainst[code] || 0) + 1;
-        }
+        if (isValidCode(code))
+          jokersMade[code] = (jokersMade[code] || 0) + 1;
       });
 
+      /* ----- picks & win tracking ----- */
       const teamWon = rd.winner === team;
       (rd[`${team}_picks`] || []).forEach((p: any) => {
         pickCounts[p.code]  = (pickCounts[p.code]  || 0) + 1;
         charPlays[p.code]   = (charPlays[p.code]   || 0) + 1;
-        if (teamWon) charWins[p.code] = (charWins[p.code] || 0) + 1;
+        if (teamWon)
+          charWins[p.code] = (charWins[p.code] || 0) + 1;
       });
 
+      /* ----- 15-cycle tracker ----- */
       const me = (rd[`${team}_team`] || []).find((m: any) => m.id === playerId);
-      if (me && Number(me.cycles) === 15) fifteenC += 1;
+      if (me && Number(me.cycles) === 15) fifteenCyclesCnt += 1;
     }
 
+    /* ---------- 6. helper functions ---------- */
     const topN = (obj: Record<string, number>, n = 3) =>
-      Object.entries(obj).sort((a, b) => b[1] - a[1]).slice(0, n)
+      Object.entries(obj)
+        .sort((a, b) => b[1] - a[1])
+        .slice(0, n)
         .map(([code, count]) => ({ code, count }));
 
-    const mostPicked = topN(pickCounts);
-    const mostBanned = topN(bansMade);
+    /* ---------- 7. build result arrays ---------- */
+    const mostPicked        = topN(pickCounts);
+    const mostBanned        = topN(bansMade);
     const mostBannedAgainst = topN(bansAgainst);
+    const combinedPrebans: Record<string, number> = { ...prebansMade };
+    for (const code in jokersMade) {
+      combinedPrebans[code] = (combinedPrebans[code] || 0) + jokersMade[code];
+    }
+    const mostPrebanned = topN(combinedPrebans);
 
+    /* ----- win-rate lists ----- */
     const MIN_GAMES = 10;
     const wrArr = Object.keys(charPlays)
       .filter(code => charPlays[code] >= MIN_GAMES)
@@ -421,48 +452,56 @@ app.get('/api/player/:id/summary', matchLimiter , async (req, res) => {
         code,
         games   : charPlays[code],
         wins    : charWins[code] || 0,
-        winRate : (charWins[code] || 0) / charPlays[code]
+        winRate : (charWins[code] || 0) / charPlays[code],
       }));
     const bestWR  = [...wrArr].sort((a, b) => b.winRate - a.winRate).slice(0, 3);
     const worstWR = [...wrArr].sort((a, b) => a.winRate - b.winRate).slice(0, 3);
 
+    /* ---------- 8. fetch static char data ---------- */
     const allCodes = [
-    ...mostPicked.map(c => c.code),
-    ...mostBanned.map(c => c.code),
-    ...mostBannedAgainst.map(c => c.code),
-    ...bestWR.map(c => c.code),
-    ...worstWR.map(c => c.code)
-  ];
-
+      ...mostPicked.map(c => c.code),
+      ...mostBanned.map(c => c.code),
+      ...mostBannedAgainst.map(c => c.code),
+      ...mostPrebanned.map(c => c.code),
+      ...bestWR.map(c => c.code),
+      ...worstWR.map(c => c.code),
+    ];
     const charMap: Record<string, { name: string; image_url: string }> = {};
     if (allCodes.length) {
       const { rows: chars } = await pool.query(
-        `SELECT code, name, image_url FROM characters WHERE code = ANY($1)`, [allCodes]);
-      chars.forEach((c: any) => charMap[c.code] = { name: c.name, image_url: c.image_url });
+        `SELECT code, name, image_url FROM characters WHERE code = ANY($1)`,
+        [allCodes]
+      );
+      chars.forEach(
+        (c: any) => (charMap[c.code] = { name: c.name, image_url: c.image_url })
+      );
     }
     const addInfo = <T extends { code: string }>(arr: T[]) =>
       arr.map(o => ({ ...o, ...charMap[o.code] }));
 
+    /* ---------- 9. assemble summary ---------- */
     const summary = {
       playerId,
       username,
       avatar,
-      mostPicked   : addInfo(mostPicked),
-      mostBanned: addInfo(mostBanned),               // ← bans made by this player
-      mostBannedAgainst: addInfo(mostBannedAgainst), // ← bans made against this player
-      bestWinRate  : addInfo(bestWR),
-      worstWinRate : addInfo(worstWR),
-      fifteenCycles: fifteenC,
-      seasonLabel  : season.label
+      mostPicked        : addInfo(mostPicked),
+      mostBanned        : addInfo(mostBanned),         // bans by this player
+      mostBannedAgainst : addInfo(mostBannedAgainst),  // bans that target this player
+      mostPrebanned     : addInfo(mostPrebanned),      // new
+      bestWinRate       : addInfo(bestWR),
+      worstWinRate      : addInfo(worstWR),
+      fifteenCycles     : fifteenCyclesCnt,
+      seasonLabel       : season.label,
     };
 
     cache.set(cacheKey, summary);
     res.json(summary);
   } catch (err) {
-    console.error('DB error (player summary)', err);
-    res.status(500).json({ error: 'Failed to build player summary' });
+    console.error("DB error (player summary)", err);
+    res.status(500).json({ error: "Failed to build player summary" });
   }
 });
+
 
 
 
