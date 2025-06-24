@@ -84,7 +84,7 @@ router.get(
   "/discord/callback",
   passport.authenticate("discord", { failureRedirect: process.env.FRONTEND_HOME_URL }),
   (req: Request, res: Response) => {
-    const redirect = req.query.redirect as string;
+    const redirect = req.query.state as string;
     res.redirect(redirect || process.env.FRONTEND_HOME_URL!);
   }
 );
