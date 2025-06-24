@@ -94,26 +94,28 @@ router.get(
     const rawRedirect = session.oauthRedirect;
     delete session.oauthRedirect;
 
-    // Add a safety fallback
-    let finalUrl = process.env.FRONTEND_HOME_URL!;
+    let finalUrl = process.env.FRONTEND_HOME_URL!; // fallback
 
-    // Only use rawRedirect if it's defined and passes validation
     if (typeof rawRedirect === "string") {
       try {
-        const url = new URL(rawRedirect);
-        if (url.hostname.endsWith(".cipher.uno")) {
+        const url = new URL(rawRedirect); // if it fails, it’s not a full URL
+        const allowed = ["cipher.uno", "draft.cipher.uno"];
+        if (allowed.some(domain => url.hostname === domain || url.hostname.endsWith("." + domain))) {
           finalUrl = rawRedirect;
         }
-      } catch (err) {
-        console.warn("⚠ Invalid redirect URL:", rawRedirect);
-        // Fallback stays as FRONTEND_HOME_URL
+      } catch {
+        // optional: allow relative paths like "/players"
+        if (rawRedirect.startsWith("/")) {
+          finalUrl = process.env.FRONTEND_HOME_URL!.replace(/\/+$/, "") + rawRedirect;
+        }
       }
     }
 
-    console.log("🔁 Final redirect to:", finalUrl);
+    console.log("🔁 Redirecting to:", finalUrl);
     res.redirect(finalUrl);
   }
 );
+
 
 
 
