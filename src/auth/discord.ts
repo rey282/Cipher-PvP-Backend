@@ -78,13 +78,25 @@ passport.use(
 
 /* ───── Routes ───── */
 
-router.get("/discord", passport.authenticate("discord"));
+router.get("/discord", (req, res, next) => {
+  const redirect = req.query.redirect as string | undefined;
+  if (redirect) {
+    req.session!.oauthRedirect = redirect;
+  }
+  passport.authenticate("discord")(req, res, next);
+});
 
 router.get(
   "/discord/callback",
   passport.authenticate("discord", { failureRedirect: process.env.FRONTEND_HOME_URL }),
   (req: Request, res: Response) => {
-    const redirect = req.query.state as string;
+    const session = req.session as typeof req.session & { oauthRedirect?: string };
+    const redirect = session.oauthRedirect;
+
+    if (session.oauthRedirect) {
+      delete session.oauthRedirect;
+    }
+
     res.redirect(redirect || process.env.FRONTEND_HOME_URL!);
   }
 );
