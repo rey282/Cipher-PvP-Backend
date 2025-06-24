@@ -78,24 +78,13 @@ passport.use(
 
 /* ───── Routes ───── */
 
-router.get(
-  "/discord",
-  (req, res, next) => {
-    const redirect = req.query.redirect as string | undefined;
-    console.log("📦 /auth/discord redirect param =", redirect);
-
-    if (redirect) {
-      req.session.oauthRedirect = redirect;
-    }
-
-    // ⬇️ Ensure session is written before starting OAuth
-    req.session.save((err) => {
-      if (err) return next(err);
-      console.log("✅ Session saved with oauthRedirect:", req.session.oauthRedirect);
-      passport.authenticate("discord")(req, res, next);
-    });
+router.get("/discord", (req, res, next) => {
+  const redirect = req.query.redirect as string | undefined;
+  if (redirect) {
+    req.session.oauthRedirect = redirect;
   }
-);
+  passport.authenticate("discord")(req, res, next);
+});
 
 router.get(
   "/discord/callback",
@@ -103,22 +92,11 @@ router.get(
   (req: Request, res: Response) => {
     const session = req.session as typeof req.session & { oauthRedirect?: string };
     const redirect = session.oauthRedirect;
-
-    if (session.oauthRedirect) {
-      delete session.oauthRedirect;
-      req.session.save(err => {
-        if (err) {
-          console.error("❌ Session save error:", err);
-          return res.redirect(process.env.FRONTEND_HOME_URL!);
-        }
-        console.log("🔁 Redirecting to:", redirect);
-        return res.redirect(redirect || process.env.FRONTEND_HOME_URL!);
-      });
-    } else {
-      return res.redirect(process.env.FRONTEND_HOME_URL!);
-    }
+    if (redirect) delete session.oauthRedirect;
+    res.redirect(redirect || process.env.FRONTEND_HOME_URL!);
   }
 );
+
 
 router.get("/me", async (req: Request, res: Response): Promise<void> => {
   if (!req.user) {
