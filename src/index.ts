@@ -45,23 +45,29 @@ const matchLimiter = rateLimit({
 // ───── Middleware ─────
 app.use(cors({
   origin: (origin, callback) => {
-    if (!origin) return callback(null, true); 
+    if (!origin) return callback(null, true);
 
-    const allowedDomains = [
-      'localhost:5173',
+    const allowedHostnames = [
+      'localhost',
       'haya-pvp.vercel.app',
     ];
 
-    const url = new URL(origin);
-    if (
-      url.hostname.endsWith('.cipher.uno') ||             
-      url.hostname === 'cipher.uno' ||
-      allowedDomains.includes(url.hostname)
-    ) {
-      callback(null, true);
-    } else {
-      callback(new Error('Not allowed by CORS'));
+    try {
+      const url = new URL(origin);
+      const hostname = url.hostname;
+
+      if (
+        hostname.endsWith('.cipher.uno') ||  
+        hostname === 'cipher.uno' ||        
+        allowedHostnames.includes(hostname)  
+      ) {
+        return callback(null, true);
+      }
+    } catch (e) {
+      return callback(new Error('Invalid origin'));
     }
+
+    callback(new Error('Not allowed by CORS'));
   },
   credentials: true,
 }));

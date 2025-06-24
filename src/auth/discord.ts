@@ -80,11 +80,25 @@ passport.use(
 
 router.get("/discord", (req, res, next) => {
   const redirect = req.query.redirect as string | undefined;
-  if (redirect) {
-    req.session.oauthRedirect = redirect;
+
+  try {
+    if (redirect) {
+      const url = new URL(redirect);
+      const allowedDomains = ['cipher.uno', 'draft.cipher.uno', 'haya-pvp.vercel.app'];
+
+      if (
+        allowedDomains.some(domain => url.hostname === domain || url.hostname.endsWith(`.${domain}`))
+      ) {
+        req.session.oauthRedirect = redirect;
+      }
+    }
+  } catch (err) {
+    console.warn("⚠️ Invalid redirect URL:", redirect);
   }
+
   passport.authenticate("discord")(req, res, next);
 });
+
 
 router.get(
   "/discord/callback",
