@@ -82,25 +82,26 @@ router.get(
   "/discord",
   (req, res, next) => {
     const redirect = req.query.redirect as string | undefined;
-    if (redirect) {
-      req.session.oauthRedirect = redirect;
-    }
+    console.log("🆕  /auth/discord  redirect param =", redirect);          // <-- A1
+    if (redirect) req.session.oauthRedirect = redirect;
+    console.log("🆕  /auth/discord  session after set =", req.session);    // <-- A2
     next();
   },
   passport.authenticate("discord")
 );
 
+//  (B)  /auth/discord/callback  – after OAuth
 router.get(
   "/discord/callback",
-  passport.authenticate("discord", { failureRedirect: process.env.FRONTEND_HOME_URL }),
+  passport.authenticate("discord", {
+    failureRedirect: process.env.FRONTEND_HOME_URL
+  }),
   (req: Request, res: Response) => {
-    const session = req.session as typeof req.session & { oauthRedirect?: string };
-    const redirect = session.oauthRedirect;
+    const s = req.session as typeof req.session & { oauthRedirect?: string };
+    console.log("✅ /callback  session seen =", s);                        // <-- B1
 
-    if (session.oauthRedirect) {
-      delete session.oauthRedirect;
-    }
-
+    const redirect = s.oauthRedirect;
+    if (redirect) delete s.oauthRedirect;
     res.redirect(redirect || process.env.FRONTEND_HOME_URL!);
   }
 );
