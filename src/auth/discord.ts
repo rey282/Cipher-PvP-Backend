@@ -60,24 +60,15 @@ passport.use(
       // ✅ Upsert to DB
       try {
         await pool.query(
-            `INSERT INTO players (
-                discord_id, nickname, avatar,
-                elo, games_played, win_rate,
-                uid, mirror_id, points,
-                description, color, banner_url
-            ) VALUES (
-                $1, $2, $3,
-                200, 0, 0.0,
-                'Not Registered', 'Not Set', 0,
-                'A glimpse into this soul’s gentle journey…', 11658748, NULL
-            )
-            ON CONFLICT (discord_id) DO UPDATE
-            SET nickname = EXCLUDED.nickname,
-                avatar   = EXCLUDED.avatar`,
-            [user.id, user.username, user.avatar]
-            );
+          `INSERT INTO discord_usernames (discord_id, username, avatar)
+          VALUES ($1, $2, $3)
+          ON CONFLICT (discord_id) DO UPDATE
+          SET username = EXCLUDED.username,
+              avatar   = EXCLUDED.avatar`,
+          [user.id, user.username, user.avatar]
+        );
       } catch (err) {
-        console.error("Failed to save user to DB:", err);
+        console.error("❌ Failed to upsert discord_usernames:", err);
       }
 
       return done(null, user);
@@ -92,8 +83,9 @@ router.get("/discord", passport.authenticate("discord"));
 router.get(
   "/discord/callback",
   passport.authenticate("discord", { failureRedirect: process.env.FRONTEND_HOME_URL }),
-  (_req: Request, res: Response) => {
-    res.redirect(process.env.FRONTEND_HOME_URL as string);
+  (req: Request, res: Response) => {
+    const redirect = req.query.redirect as string;
+    res.redirect(redirect || process.env.FRONTEND_HOME_URL!);
   }
 );
 
@@ -121,6 +113,27 @@ router.get("/me", async (req: Request, res: Response): Promise<void> => {
     console.error("Error fetching avatar from DB:", err);
     res.json({ user: baseUser });
   }
+});
+
+// ───── Logout Route ─────
+router.post("/logout", (req: Request, res: Response) => {
+  req.logout((err) => {
+    if (err) {
+      console.error("❌ Logout error:", err);
+      return res.status(500).json({ error: "Logout failed" });
+    }
+
+    req.session.destroy(() => {
+      res.clearCookie("cid", {
+        path: "/",
+        domain: process.env.NODE_ENV === "production" ? ".cipher.uno" : undefined,
+        sameSite: process.env.NODE_ENV === "production" ? "none" : "lax",
+        secure: process.env.NODE_ENV === "production",
+      });
+
+      res.status(200).json({ message: "Logged out" });
+    });
+  });
 });
 
 export { router as discordAuthRouter };
