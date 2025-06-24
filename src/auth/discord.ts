@@ -78,13 +78,17 @@ passport.use(
 
 /* ───── Routes ───── */
 
-router.get("/discord", (req, res, next) => {
-  const redirect = req.query.redirect as string | undefined;
-  if (redirect) {
-    req.session!.oauthRedirect = redirect;
-  }
-  passport.authenticate("discord")(req, res, next);
-});
+router.get(
+  "/discord",
+  (req, res, next) => {
+    const redirect = req.query.redirect as string | undefined;
+    if (redirect) {
+      req.session.oauthRedirect = redirect;
+    }
+    next();
+  },
+  passport.authenticate("discord")
+);
 
 router.get(
   "/discord/callback",
@@ -116,7 +120,7 @@ router.get("/me", async (req: Request, res: Response): Promise<void> => {
 
   try {
     const result = await pool.query(
-      `SELECT avatar FROM players WHERE discord_id = $1`,
+      `SELECT avatar FROM discord_usernames WHERE discord_id = $1`,
       [baseUser.id]
     );
     const avatar = result.rows[0]?.avatar ?? null;

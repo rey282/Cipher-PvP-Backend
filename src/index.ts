@@ -319,7 +319,7 @@ app.get("/api/player/:id/summary", matchLimiter, async (req, res) => {
   try {
     /* ---------- 1. basic user info (name + avatar) ---------- */
     const userRes = await pool.query(
-      `SELECT COALESCE(d.username, p.nickname) AS username, p.avatar
+      `SELECT COALESCE(d.username, p.nickname) AS username, d.avatar
          FROM players p
     LEFT JOIN discord_usernames d ON p.discord_id = d.discord_id
         WHERE p.discord_id = $1`,
