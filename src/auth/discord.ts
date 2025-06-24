@@ -91,9 +91,16 @@ router.get(
   passport.authenticate("discord", { failureRedirect: process.env.FRONTEND_HOME_URL }),
   (req: Request, res: Response) => {
     const session = req.session as typeof req.session & { oauthRedirect?: string };
-    const redirect = session.oauthRedirect;
-    if (redirect) delete session.oauthRedirect;
-    res.redirect(redirect || process.env.FRONTEND_HOME_URL!);
+
+    const rawPath  = session.oauthRedirect || "/";
+    delete session.oauthRedirect;
+
+    // Ensure leading slash, then prepend frontend origin
+    const redirectUrl =
+      `${process.env.FRONTEND_HOME_URL!.replace(/\/+$/, "")}` +
+      `${rawPath.startsWith("/") ? rawPath : `/${rawPath}`}`;
+
+    res.redirect(redirectUrl);
   }
 );
 
