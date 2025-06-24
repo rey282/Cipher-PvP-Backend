@@ -101,29 +101,31 @@ router.get(
     let finalUrl = process.env.FRONTEND_HOME_URL!; // fallback
 
     if (typeof rawRedirect === "string") {
-      try {
-        // If it's a full URL
-        const url = new URL(rawRedirect);
-        const hostname = url.hostname;
+      if (rawRedirect.startsWith("http")) {
+        // ✅ It's a full URL
+        try {
+          const url = new URL(rawRedirect);
+          const hostname = url.hostname;
 
-        const allowed = ["cipher.uno", "draft.cipher.uno"];
-        const isAllowed = allowed.some(
-          domain =>
-            hostname === domain || hostname.endsWith("." + domain)
-        );
+          const allowed = ["cipher.uno", "draft.cipher.uno"];
+          const isAllowed = allowed.some(
+            domain =>
+              hostname === domain || hostname.endsWith("." + domain)
+          );
 
-        if (isAllowed) {
-          finalUrl = rawRedirect;
-        } else {
-          console.warn("❌ Rejected unsafe domain in redirect:", hostname);
+          if (isAllowed) {
+            finalUrl = rawRedirect;
+          } else {
+            console.warn("❌ Rejected unsafe domain in redirect:", hostname);
+          }
+        } catch {
+          console.warn("❌ Invalid full URL format:", rawRedirect);
         }
-      } catch {
-        // If it's a relative path like "/players"
-        if (rawRedirect.startsWith("/")) {
-          finalUrl = `${process.env.FRONTEND_HOME_URL!.replace(/\/+$/, "")}${rawRedirect}`;
-        } else {
-          console.warn("❌ Invalid redirect path format:", rawRedirect);
-        }
+      } else if (rawRedirect.startsWith("/")) {
+        // ✅ It's a safe relative path
+        finalUrl = `${process.env.FRONTEND_HOME_URL!.replace(/\/+$/, "")}${rawRedirect}`;
+      } else {
+        console.warn("❌ Unknown redirect format:", rawRedirect);
       }
     }
 
@@ -131,9 +133,6 @@ router.get(
     res.redirect(finalUrl);
   }
 );
-
-
-
 
 
 router.get("/me", async (req: Request, res: Response): Promise<void> => {
