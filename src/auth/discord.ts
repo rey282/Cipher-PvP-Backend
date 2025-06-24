@@ -99,20 +99,26 @@ router.get(
 
 router.get(
   "/discord/callback",
-  passport.authenticate("discord", {
-    failureRedirect: process.env.FRONTEND_HOME_URL,
-  }),
+  passport.authenticate("discord", { failureRedirect: process.env.FRONTEND_HOME_URL }),
   (req: Request, res: Response) => {
     const session = req.session as typeof req.session & { oauthRedirect?: string };
-
     const redirect = session.oauthRedirect;
-    if (redirect) delete session.oauthRedirect;
 
-    console.log("🔁 Redirecting to:", redirect || process.env.FRONTEND_HOME_URL);
-    res.redirect(redirect || process.env.FRONTEND_HOME_URL!);
+    if (session.oauthRedirect) {
+      delete session.oauthRedirect;
+      req.session.save(err => {
+        if (err) {
+          console.error("❌ Session save error:", err);
+          return res.redirect(process.env.FRONTEND_HOME_URL!);
+        }
+        console.log("🔁 Redirecting to:", redirect);
+        return res.redirect(redirect || process.env.FRONTEND_HOME_URL!);
+      });
+    } else {
+      return res.redirect(process.env.FRONTEND_HOME_URL!);
+    }
   }
 );
-
 
 router.get("/me", async (req: Request, res: Response): Promise<void> => {
   if (!req.user) {
