@@ -88,49 +88,12 @@ router.get("/discord", (req, res, next) => {
 
 router.get(
   "/discord/callback",
-  passport.authenticate("discord", {
-    failureRedirect: process.env.FRONTEND_HOME_URL,
-  }),
+  passport.authenticate("discord", { failureRedirect: process.env.FRONTEND_HOME_URL }),
   (req: Request, res: Response) => {
-    const session = req.session as typeof req.session & {
-      oauthRedirect?: string;
-    };
-    const rawRedirect = session.oauthRedirect;
-    delete session.oauthRedirect;
-
-    let finalUrl = process.env.FRONTEND_HOME_URL!; // fallback
-
-    if (typeof rawRedirect === "string") {
-      if (rawRedirect.startsWith("http")) {
-        // ✅ It's a full URL
-        try {
-          const url = new URL(rawRedirect);
-          const hostname = url.hostname;
-
-          const allowed = ["cipher.uno", "draft.cipher.uno"];
-          const isAllowed = allowed.some(
-            domain =>
-              hostname === domain || hostname.endsWith("." + domain)
-          );
-
-          if (isAllowed) {
-            finalUrl = rawRedirect;
-          } else {
-            console.warn("❌ Rejected unsafe domain in redirect:", hostname);
-          }
-        } catch {
-          console.warn("❌ Invalid full URL format:", rawRedirect);
-        }
-      } else if (rawRedirect.startsWith("/")) {
-        // ✅ It's a safe relative path
-        finalUrl = `${process.env.FRONTEND_HOME_URL!.replace(/\/+$/, "")}${rawRedirect}`;
-      } else {
-        console.warn("❌ Unknown redirect format:", rawRedirect);
-      }
-    }
-
-    console.log("🔁 Final redirect to:", finalUrl);
-    res.redirect(finalUrl);
+    const session = req.session as typeof req.session & { oauthRedirect?: string };
+    const redirect = session.oauthRedirect;
+    if (redirect) delete session.oauthRedirect;
+    res.redirect(redirect || process.env.FRONTEND_HOME_URL!);
   }
 );
 
