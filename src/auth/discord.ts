@@ -89,7 +89,7 @@ router.get("/discord", (req, res, next) => {
       if (
         allowedDomains.some(domain => url.hostname === domain || url.hostname.endsWith(`.${domain}`))
       ) {
-        req.session.oauthRedirect = redirect;
+        (req.session as any).oauthRedirect = redirect;
       }
     }
   } catch (err) {
@@ -111,7 +111,6 @@ router.get(
   }
 );
 
-
 router.get("/me", async (req: Request, res: Response): Promise<void> => {
   if (!req.user) {
     res.json({ user: null });
@@ -120,23 +119,42 @@ router.get("/me", async (req: Request, res: Response): Promise<void> => {
 
   const baseUser = req.user as DiscordUser;
 
-  if (baseUser.avatar) {
-    res.json({ user: baseUser });
-    return;
-  }
-
   try {
-    const result = await pool.query(
-      `SELECT avatar FROM discord_usernames WHERE discord_id = $1`,
-      [baseUser.id]
-    );
-    const avatar = result.rows[0]?.avatar ?? null;
-    res.json({ user: { ...baseUser, avatar } });
+    // Get avatar from DB if missing
+    let avatar = baseUser.avatar;
+    if (!avatar) {
+      const avatarResult = await pool.query(
+        `SELECT avatar FROM discord_usernames WHERE discord_id = $1`,
+        [baseUser.id]
+      );
+      avatar = avatarResult.rows[0]?.avatar ?? null;
+    }
+
+    // Safe check for admin status
+    let isAdmin = false;
+    try {
+      const adminResult = await pool.query(
+        `SELECT 1 FROM admin_users WHERE discord_id = $1`,
+        [baseUser.id]
+      );
+      isAdmin = !!adminResult?.rowCount;
+    } catch (adminErr) {
+      console.error("Error checking admin status:", adminErr);
+    }
+
+    res.json({
+      user: {
+        ...baseUser,
+        avatar,
+        isAdmin,
+      },
+    });
   } catch (err) {
-    console.error("Error fetching avatar from DB:", err);
-    res.json({ user: baseUser });
+    console.error("Error fetching user data:", err);
+    res.json({ user: { ...baseUser } }); // fallback
   }
 });
+
 
 // ───── Logout Route ─────
 router.post("/logout", (req: Request, res: Response) => {

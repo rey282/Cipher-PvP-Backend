@@ -9,7 +9,7 @@ import pgSession from 'connect-pg-simple';
 import passport from 'passport';
 import { discordAuthRouter } from './auth/discord';
 import { pool } from './db';
-
+import { requireAdmin } from "./middleware/requireAdmin";
 dotenv.config();
 
 const requiredEnvs = ['DATABASE_URL', 'SESSION_SECRET'];
@@ -664,6 +664,66 @@ app.get('/api/player/:id/matches', matchLimiter, async (req, res) => {
   }
 });
 
+/* ─────────── /api/balance ─────────── */
+app.get("/api/balance", async (req, res) => {
+  try {
+    const { rows } = await pool.query(`
+      SELECT id, name, costs
+      FROM balance_costs
+      ORDER BY name ASC
+    `);
+
+    const characters = rows.map((row: any) => ({
+      id: row.id,
+      name: row.name,
+      costs: row.costs,
+    }));
+
+    res.json({ characters });
+  } catch (err) {
+    console.error("DB error (balance)", err);
+    res.status(500).json({ error: "Failed to fetch balance data" });
+  }
+});
+
+app.put("/api/admin/balance", requireAdmin, async (req, res): Promise<void> => {
+  const { characters } = req.body;
+
+  if (!Array.isArray(characters)) {
+    res.status(400).json({ error: "Missing characters array" });
+    return;
+  }
+
+  try {
+    await pool.query("BEGIN");
+    await pool.query("DELETE FROM balance_costs");
+
+    for (const c of characters) {
+      if (!c.id || !c.name || !Array.isArray(c.costs) || c.costs.length !== 7) {
+        throw new Error(`Invalid character entry for id ${c.id || "unknown"}`);
+      }
+
+      await pool.query(
+        `INSERT INTO balance_costs (id, name, costs)
+         VALUES ($1, $2, $3)
+         ON CONFLICT (id)
+         DO UPDATE SET name = $2, costs = $3`,
+        [c.id, c.name, JSON.stringify(c.costs)]
+      );
+    }
+
+    await pool.query("COMMIT");
+    res.status(200).json({ success: true });
+    return;
+  } catch (err) {
+    await pool.query("ROLLBACK").catch(() => {});
+    console.error("DB error (balance PUT)", err);
+    res.status(500).json({ error: "Failed to update balance data" });
+    return;
+  }
+});
+
+
 /* ─────────── health check ─────────── */
 app.get("/ping", (req, res) => {
   res.status(200).send("pong");
@@ -675,4 +735,7 @@ app.use((_, res, _next) => {
 });
 
 /* ─────────── start ─────────── */
-app.listen(PORT, () => console.log(`✅ Backend running on http://localhost:${PORT}`));
+app.listen(PORT, () => {
+  console.log(`✅ Backend running on ${isProd ? "https://api.cipher.uno" : `http://localhost:${PORT}`}`);
+});
+
