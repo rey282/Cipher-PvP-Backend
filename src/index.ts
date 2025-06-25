@@ -10,6 +10,7 @@ import passport from 'passport';
 import { discordAuthRouter } from './auth/discord';
 import { pool } from './db';
 import { requireAdmin } from "./middleware/requireAdmin";
+import rosterRouter from "./routes/roster"; 
 dotenv.config();
 
 const requiredEnvs = ['DATABASE_URL', 'SESSION_SECRET'];
@@ -99,7 +100,7 @@ app.use(passport.session());
 app.use(globalLimiter);
 app.use(helmet());
 app.use(express.json({ limit: '1mb' }));
-
+app.use(rosterRouter);
 // ───── New auth routes ─────
 app.use('/auth', discordAuthRouter);
 
@@ -713,6 +714,7 @@ app.put("/api/admin/balance", requireAdmin, async (req, res): Promise<void> => {
     }
 
     await pool.query("COMMIT");
+    await recomputePlayerPoints();
     res.status(200).json({ success: true });
     return;
   } catch (err) {
@@ -723,6 +725,54 @@ app.put("/api/admin/balance", requireAdmin, async (req, res): Promise<void> => {
   }
 });
 
+/* ------------------------------------------------------------------ */
+/*  Helper:  Re-calculate each player’s points after balance changes  */
+/* ------------------------------------------------------------------ */
+async function recomputePlayerPoints() {
+  // 1. grab user → roster list from the draft-api server
+  const res = await fetch("https://draft-api.cipher.uno/getUsers");
+  if (!res.ok) {
+    throw new Error(`getUsers fetch failed: ${res.status}`);
+  }
+  const users: {
+    discordId: string;
+    profileCharacters: { id: string; eidolon: number }[];
+  }[] = await res.json();
+
+  // 2. make one DB call to pull EVERY character cost row
+  const { rows } = await pool.query<{
+    id: string;
+    costs: number[];
+  }>("SELECT id, costs FROM balance_costs");
+  const costMap: Record<string, number[]> = {};
+  rows.forEach((r) => (costMap[r.id] = r.costs));
+
+  // 3. build bulk update list: [{ id, points }, …]
+  const updates: { id: string; points: number }[] = users.map((u) => {
+    const total = u.profileCharacters.reduce((sum, pc) => {
+      const costs = costMap[pc.id];
+      if (!costs) return sum;              // unknown ID → 0 pts
+      const e = Math.min(Math.max(pc.eidolon, 0), 6);
+      return sum + costs[e];
+    }, 0);
+    return { id: u.discordId, points: total };
+  });
+
+  // 4. perform bulk updates in a single query
+  //    (Postgres - unnest into a VALUES list)
+  const ids   = updates.map((u) => u.id);
+  const pts   = updates.map((u) => u.points);
+  await pool.query(
+    `
+    UPDATE players AS p
+       SET points = u.points
+      FROM (SELECT UNNEST($1::text[])  AS id,
+                   UNNEST($2::int[])   AS points) AS u
+     WHERE p.discord_id = u.id;
+    `,
+    [ids, pts]
+  );
+}
 
 /* ─────────── health check ─────────── */
 app.get("/ping", (req, res) => {
