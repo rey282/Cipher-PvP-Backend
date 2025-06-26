@@ -14,6 +14,7 @@ type DiscordUser = {
   username: string;
   discriminator: string;
   avatar?: string | null;
+  global_name?: string | null;
 };
 
 /* ───── Set up Passport serialization ───── */
@@ -50,23 +51,27 @@ passport.use(
       profile: DiscordProfile,
       done: (error: any, user?: any) => void
     ) => {
+      const globalName = (profile as any).global_name ?? null;
+
       const user: DiscordUser = {
         id: profile.id,
         username: profile.displayName ?? profile.username ?? "Unknown",
         discriminator: profile.discriminator ?? "0000",
         avatar: profile.avatar ?? profile._json?.avatar ?? null,
-        };
+        global_name: globalName,
+      };
 
       // ✅ Upsert to DB
       try {
         await pool.query(
-          `INSERT INTO discord_usernames (discord_id, username, avatar)
-          VALUES ($1, $2, $3)
-          ON CONFLICT (discord_id) DO UPDATE
-          SET username = EXCLUDED.username,
-              avatar   = EXCLUDED.avatar`,
-          [user.id, user.username, user.avatar]
-        );
+          `INSERT INTO discord_usernames (discord_id, username, global_name, avatar)
+           VALUES ($1, $2, $3, $4)
+           ON CONFLICT (discord_id) DO UPDATE
+           SET username     = EXCLUDED.username,
+               global_name  = EXCLUDED.global_name,
+               avatar       = EXCLUDED.avatar`,
+          [user.id, user.username, globalName, user.avatar]
+        );        
       } catch (err) {
         console.error("❌ Failed to upsert discord_usernames:", err);
       }

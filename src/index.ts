@@ -235,7 +235,10 @@ app.get('/api/players', async (req, res) => {
   const cacheKey  = `player_stats_${season.table || 'all'}`;
 
   const cached = cache.get(cacheKey);
-  if (cached) { res.json(cached); return; }
+  if (cached) {
+    res.json(cached);
+    return;
+  }
 
   let q: string;
   let totalMatches = 0;
@@ -244,7 +247,7 @@ app.get('/api/players', async (req, res) => {
     if (season.table) {
       q = `
         SELECT p.discord_id,
-               COALESCE(d.username, p.nickname)             AS username,
+               COALESCE(d.global_name, d.username, p.nickname) AS username,
                p.nickname,
                p.elo,
                p.games_played,
@@ -261,7 +264,7 @@ app.get('/api/players', async (req, res) => {
         // All-Time
         const matchCount = await pool.query(`SELECT COUNT(*) FROM matches`);
         totalMatches = Number(matchCount.rows[0].count || 0);
-      
+
       } else if (season.start && !season.end) {
         // Current active season
         const matchCount = await pool.query(
@@ -269,7 +272,7 @@ app.get('/api/players', async (req, res) => {
           [season.start]
         );
         totalMatches = Number(matchCount.rows[0].count || 0);
-      
+
       } else if (season.start && season.end) {
         // Past season
         const matchCount = await pool.query(
@@ -278,17 +281,17 @@ app.get('/api/players', async (req, res) => {
         );
         totalMatches = Number(matchCount.rows[0].count || 0);
       }
-      
+
     } else {
       const unionSQL = Object.values(SEASONS)
-                       .filter(s => s.table)
-                       .map(s => `SELECT * FROM ${s.table}`)
-                       .join(' UNION ALL ');
+        .filter(s => s.table)
+        .map(s => `SELECT * FROM ${s.table}`)
+        .join(' UNION ALL ');
 
       q = `
         WITH u AS (${unionSQL})
         SELECT u.discord_id,
-               MAX(COALESCE(d.username, u.nickname))         AS username,
+               MAX(COALESCE(d.global_name, d.username, u.nickname)) AS username,
                MAX(u.nickname)                               AS nickname,
                AVG(u.elo)                                    AS elo,
                SUM(u.games_played)::int                      AS games_played,
@@ -342,14 +345,17 @@ app.get("/api/player/:id/summary", matchLimiter, async (req, res) => {
   try {
     /* ---------- 1. basic user info (name + avatar) ---------- */
     const userRes = await pool.query(
-      `SELECT COALESCE(d.username, p.nickname) AS username, d.avatar
-         FROM players p
+      `SELECT COALESCE(d.username, p.nickname) AS username,
+        d.global_name,
+        d.avatar
+      FROM players p
     LEFT JOIN discord_usernames d ON p.discord_id = d.discord_id
-        WHERE p.discord_id = $1`,
+    WHERE p.discord_id = $1`,
       [playerId]
     );
     const userRow = userRes.rows[0] || {};
     const username = userRow.username || "Unknown";
+    const globalName = userRow.global_name || null;
     const avatar   = userRow.avatar   || null;
 
     /* ---------- 2. fetch raw matches for this player ---------- */
@@ -506,6 +512,7 @@ app.get("/api/player/:id/summary", matchLimiter, async (req, res) => {
     const summary = {
       playerId,
       username,
+      global_name: globalName,
       avatar,
       mostPicked        : addInfo(mostPicked),
       mostBanned        : addInfo(mostBanned),         // bans by this player
