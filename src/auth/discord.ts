@@ -18,8 +18,20 @@ type DiscordUser = {
 };
 
 /* ───── Set up Passport serialization ───── */
-passport.serializeUser((user: any, done) => {
-  done(null, user);
+passport.deserializeUser(async (obj: any, done) => {
+  try {
+    const result = await pool.query(
+      `SELECT 1 FROM admin_users WHERE discord_id = $1`,
+      [obj.id]
+    );
+
+    const isAdmin = (result?.rowCount ?? 0) > 0;
+
+    done(null, { ...obj, isAdmin });
+  } catch (err) {
+    console.error("❌ Failed to check admin status during deserialization:", err);
+    done(null, { ...obj, isAdmin: false });
+  }
 });
 
 passport.deserializeUser((obj: any, done) => {
