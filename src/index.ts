@@ -11,6 +11,7 @@ import { discordAuthRouter } from './auth/discord';
 import { pool } from './db';
 import { requireAdmin } from "./middleware/requireAdmin";
 import rosterRouter from "./routes/roster"; 
+import announcementRouter from "./routes/announcement";
 dotenv.config();
 
 const requiredEnvs = ['DATABASE_URL', 'SESSION_SECRET'];
@@ -101,6 +102,7 @@ app.use(globalLimiter);
 app.use(helmet());
 app.use(express.json({ limit: '1mb' }));
 app.use(rosterRouter);
+app.use("/api/announcement", announcementRouter);
 
 // ───── New auth routes ─────
 app.use('/auth', discordAuthRouter);
