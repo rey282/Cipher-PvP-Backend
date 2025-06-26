@@ -424,14 +424,29 @@ app.get('/api/player/:id', async (req, res) => {
 
 
 /* ─────────── /api/player/:id (update profile) ─────────── */
-app.patch('/api/player/:id', async (req, res) => {
+app.patch('/api/player/:id', async (req, res): Promise<void> => {
   const { id } = req.params;
   const { description, banner_url } = req.body as {
     description?: string;
     banner_url?: string;
   };
 
-  if (!isOwnerOrAdmin(req, id)) { res.sendStatus(403); return; }
+  const viewer = req.user as { id?: string } | undefined;
+
+  if (!viewer || (viewer.id !== id)) {
+    // Not the owner, check if admin
+    const result = await pool.query(
+      `SELECT 1 FROM admin_users WHERE discord_id = $1`,
+      [viewer?.id]
+    );
+
+    const isAdmin = (result?.rowCount ?? 0) > 0;
+    if (!isAdmin) {
+      res.sendStatus(403);
+      return;            
+    }
+  }
+
   if (description === undefined && banner_url === undefined) {
     res.status(400).json({ error: 'Nothing to update' });
     return;
