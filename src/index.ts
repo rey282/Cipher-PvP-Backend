@@ -5,6 +5,7 @@ import rateLimit from 'express-rate-limit';
 import NodeCache from 'node-cache';
 import helmet from 'helmet';
 import session from 'express-session';
+import type { Request, Response } from "express";
 import pgSession from 'connect-pg-simple';
 import passport from 'passport';
 import { discordAuthRouter } from './auth/discord';
@@ -1162,7 +1163,7 @@ app.put("/api/admin/balance", requireAdmin, async (req, res): Promise<void> => {
 /* ------------------------------------------------------------------ */
 async function recomputePlayerPoints() {
   // 1. grab user → roster list from the draft-api server
-  const res = await fetch("https://draft-api.cipher.uno/getUsers");
+  const res = await fetch(`${process.env.YANYAN_API_URL}/getUsers`);
   if (!res.ok) {
     throw new Error(`getUsers fetch failed: ${res.status}`);
   }
@@ -1205,6 +1206,94 @@ async function recomputePlayerPoints() {
     [ids, pts]
   );
 }
+
+/* ─────────── /api/insights ─────────── */
+app.get('/api/insights', async (req: Request, res: Response): Promise<void> => {
+  const seasonKey = req.query.season as string;
+  const season = seasonFromQuery(seasonKey); // ← uses your SEASONS mapping
+  const cacheKey = `hsr_insights_${seasonKey || 'players'}`;
+
+  const cached = cache.get(cacheKey);
+  if (cached) {
+    res.json(cached);
+    return;
+  }
+
+
+  try {
+    const whereClauses: string[] = ["has_character_data = TRUE"];
+    const values: any[] = [];
+
+    if (season.start) {
+      values.push(season.start);
+      whereClauses.push(`timestamp >= $${values.length}`);
+    }
+    if (season.end) {
+      const endDate = new Date(season.end);
+      endDate.setDate(endDate.getDate() + 1);
+      values.push(endDate.toISOString().slice(0, 10));
+      whereClauses.push(`timestamp < $${values.length}`);
+    }
+
+    const query = `
+      SELECT 
+        timestamp,
+        raw_data->'red_team'  AS red_team,
+        raw_data->'blue_team' AS blue_team,
+        raw_data->'prebans'   AS prebans,
+        raw_data->'jokers'    AS jokers,
+        COALESCE((raw_data->>'red_penalty')::int, 0)  AS red_penalty,
+        COALESCE((raw_data->>'blue_penalty')::int, 0) AS blue_penalty
+      FROM matches
+      WHERE ${whereClauses.join(" AND ")}
+    `;
+
+    const { rows } = await pool.query(query, values);
+
+    let totalMatches = 0;
+    let totalCycles = 0;
+    let total15cCycles = 0;
+    let totalPrebans = 0;
+    let totalPenalties = 0;
+
+    const matchesByDay: Record<string, number> = {};
+
+    for (const row of rows) {
+      const date = new Date(row.timestamp).toISOString().slice(0, 10);
+      matchesByDay[date] = (matchesByDay[date] || 0) + 1;
+      totalMatches++;
+
+      const redTeam = row.red_team ?? [];
+      const blueTeam = row.blue_team ?? [];
+      const allCycles = [...redTeam, ...blueTeam].map((m: any) => m.cycles || 0);
+
+      totalCycles += allCycles.filter((v: number) => v !== 15).reduce((a, b) => a + b, 0);
+      total15cCycles += allCycles.filter((v: number) => v === 15).length;
+
+      totalPrebans += (row.prebans?.length || 0) + (row.jokers?.length || 0);
+      totalPenalties += row.red_penalty + row.blue_penalty;
+    }
+    
+    const response = {
+      averageCyclesPerMatch: totalMatches ? totalCycles / (totalMatches * 2) : 0,
+      averagePrebansPerMatch: totalMatches ? totalPrebans / totalMatches : 0,
+      averagePenaltyPerMatch: totalMatches ? totalPenalties / totalMatches : 0,
+      matchesByDay,
+      totalMatches,
+      total15cCycles,
+      lastFetched: new Date().toISOString(),
+    };
+
+    cache.set(cacheKey, response, 600); // cache 10 min
+    res.json(response);
+  } catch (err) {
+    console.error("Error generating insights:", err);
+    res.status(500).json({ error: "Failed to load insights" });
+  }
+});
+
+
+
 
 /* ─────────── health check ─────────── */
 app.get("/ping", (req, res) => {
