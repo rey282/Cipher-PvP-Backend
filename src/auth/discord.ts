@@ -4,6 +4,7 @@ import { Strategy as DiscordStrategy } from "passport-discord";
 import { Profile as PassportProfile } from "passport";
 import { pool } from "../db"; 
 import dotenv from "dotenv";
+import rateLimit from "express-rate-limit";
 
 dotenv.config();
 const router = Router();
@@ -81,9 +82,17 @@ passport.use(
   )
 );
 
+const loginLimiter = rateLimit({
+  windowMs: 10 * 60 * 1000, 
+  max: 10, 
+  message: "Too many login attempts. Please try again later.",
+  standardHeaders: true, 
+  legacyHeaders: false,
+});
+
 /* ───── Routes ───── */
 
-router.get("/discord", (req, res, next) => {
+router.get("/discord", loginLimiter, (req, res, next) => {
   const redirect = req.query.redirect as string | undefined;
 
   try {
