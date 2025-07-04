@@ -13,6 +13,7 @@ import { pool } from './db';
 import { requireAdmin } from "./middleware/requireAdmin";
 import rosterRouter from "./routes/roster"; 
 import announcementRouter from "./routes/announcement";
+import { ErrorRequestHandler } from "express";
 dotenv.config();
 
 const requiredEnvs = ['DATABASE_URL', 'SESSION_SECRET'];
@@ -104,6 +105,19 @@ app.use(helmet());
 app.use(express.json({ limit: '1mb' }));
 app.use(rosterRouter);
 app.use("/api/announcement", announcementRouter);
+
+const oauthErrorHandler: ErrorRequestHandler = (err, req, res, next) => {
+  console.error("🔥 OAuth error:", err);
+
+  const raw = (err as any)?.oauthError?.data?.toString?.();
+  if (raw) {
+    console.error("📨 Discord raw response:", raw);
+  }
+
+  res.status(500).send("OAuth Error: " + err.message);
+};
+
+app.use(oauthErrorHandler);
 
 // ───── New auth routes ─────
 app.use('/auth', discordAuthRouter);
