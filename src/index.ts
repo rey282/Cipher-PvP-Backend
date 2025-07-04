@@ -13,7 +13,7 @@ import { pool } from './db';
 import { requireAdmin } from "./middleware/requireAdmin";
 import rosterRouter from "./routes/roster"; 
 import announcementRouter from "./routes/announcement";
-import { ErrorRequestHandler } from "express";
+
 dotenv.config();
 
 const requiredEnvs = ['DATABASE_URL', 'SESSION_SECRET'];
@@ -105,36 +105,6 @@ app.use(helmet());
 app.use(express.json({ limit: '1mb' }));
 app.use(rosterRouter);
 app.use("/api/announcement", announcementRouter);
-
-const oauthErrorHandler: ErrorRequestHandler = (err, req, res, next) => {
-  console.error("🔥 OAuth error:", err);
-
-  // Try to print discord raw error in different ways
-  if (err && typeof err === "object") {
-    if ("oauthError" in err && err.oauthError) {
-      if ("data" in err.oauthError) {
-        const data = err.oauthError.data;
-        if (Buffer.isBuffer(data)) {
-          console.error("📨 Discord raw response (buffer):", data.toString());
-        } else if (typeof data === "string") {
-          console.error("📨 Discord raw response (string):", data);
-        } else {
-          console.error("📨 Discord raw response (unknown):", data);
-        }
-      } else {
-        console.error("📨 No data property on oauthError:", err.oauthError);
-      }
-    } else {
-      console.error("📨 No oauthError property on err");
-    }
-  } else {
-    console.error("📨 err is not an object");
-  }
-
-  res.status(500).send("OAuth Error: " + (err.message || String(err)));
-};
-
-app.use(oauthErrorHandler);
 
 // ───── New auth routes ─────
 app.use('/auth', discordAuthRouter);
