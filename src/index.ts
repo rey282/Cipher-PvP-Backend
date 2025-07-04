@@ -46,34 +46,45 @@ const matchLimiter = rateLimit({
   message: { status: 429, error: 'Too many match requests – please slow down.' }
 });
 
-// ───── Middleware ─────
 app.use(cors({
   origin: (origin, callback) => {
+    // Allow requests with no origin (e.g., mobile apps, Postman)
     if (!origin) return callback(null, true);
 
-    const allowedHostnames = [
-      'localhost',
+    // Debugging: Log incoming origin (remove in production)
+    console.log('Incoming origin:', origin);
+
+    const allowedDomains = [
+      'cipher.uno',
+      'www.cipher.uno',
       'haya-pvp.vercel.app',
+      'localhost' // Covers all ports (localhost:3000, etc.)
     ];
 
     try {
       const url = new URL(origin);
       const hostname = url.hostname;
 
-      if (
-        hostname.endsWith('.cipher.uno') ||  
-        hostname === 'cipher.uno' ||        
-        allowedHostnames.includes(hostname)  
-      ) {
+      // Check against allowed domains
+      const isAllowed =
+        allowedDomains.some(domain => hostname === domain) || 
+        hostname.endsWith('.cipher.uno') ||                   
+        hostname.startsWith('localhost');                     
+
+      if (isAllowed) {
         return callback(null, true);
+      } else {
+        console.warn('Blocked origin:', origin); // Debug
+        return callback(new Error('Not allowed by CORS'));
       }
-    } catch (e) {
+    } catch (err) {
+      console.error('Invalid origin URL:', origin, err);
       return callback(new Error('Invalid origin'));
     }
-
-    callback(new Error('Not allowed by CORS'));
   },
-  credentials: true,
+  credentials: true, // Required for cookies/sessions
+  methods: ['GET', 'POST', 'PUT', 'DELETE', 'OPTIONS'], // Allowed HTTP methods
+  allowedHeaders: ['Content-Type', 'Authorization'], // Allowed headers
 }));
 
 /* ───── Sessions (PostgreSQL-backed) ───── */
