@@ -109,12 +109,29 @@ app.use("/api/announcement", announcementRouter);
 const oauthErrorHandler: ErrorRequestHandler = (err, req, res, next) => {
   console.error("🔥 OAuth error:", err);
 
-  const raw = (err as any)?.oauthError?.data?.toString?.();
-  if (raw) {
-    console.error("📨 Discord raw response:", raw);
+  // Try to print discord raw error in different ways
+  if (err && typeof err === "object") {
+    if ("oauthError" in err && err.oauthError) {
+      if ("data" in err.oauthError) {
+        const data = err.oauthError.data;
+        if (Buffer.isBuffer(data)) {
+          console.error("📨 Discord raw response (buffer):", data.toString());
+        } else if (typeof data === "string") {
+          console.error("📨 Discord raw response (string):", data);
+        } else {
+          console.error("📨 Discord raw response (unknown):", data);
+        }
+      } else {
+        console.error("📨 No data property on oauthError:", err.oauthError);
+      }
+    } else {
+      console.error("📨 No oauthError property on err");
+    }
+  } else {
+    console.error("📨 err is not an object");
   }
 
-  res.status(500).send("OAuth Error: " + err.message);
+  res.status(500).send("OAuth Error: " + (err.message || String(err)));
 };
 
 app.use(oauthErrorHandler);
