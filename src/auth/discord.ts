@@ -45,6 +45,8 @@ passport.use(
       clientSecret: process.env.DISCORD_CLIENT_SECRET as string,
       callbackURL: process.env.DISCORD_REDIRECT_URI as string,
       scope: ["identify"],
+      state: true, 
+      passReqToCallback: true,
     },
     async (
       _accessToken: string,
