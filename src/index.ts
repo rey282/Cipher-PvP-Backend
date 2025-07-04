@@ -1463,6 +1463,6 @@ app.use((_, res, _next) => {
 
 /* ─────────── start ─────────── */
 app.listen(PORT, () => {
-  console.log(`✅ Backend running on ${isProd ? "https://api.cipher.uno" : `http://localhost:${PORT}`}`);
+  console.log(`✅ Backend running on ${isProd ? "https://spajaja.cipher.uno" : `http://localhost:${PORT}`}`);
 });
 
