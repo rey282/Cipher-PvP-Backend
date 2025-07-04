@@ -1,4 +1,4 @@
-import { Router, Request, Response } from "express";
+import { Router, Request, Response, NextFunction } from "express";
 import passport from "passport";
 import { Strategy as DiscordStrategy } from "passport-discord";
 import { Profile as PassportProfile } from "passport";
@@ -107,14 +107,35 @@ router.get("/discord", (req, res, next) => {
 
 router.get(
   "/discord/callback",
-  passport.authenticate("discord", { failureRedirect: process.env.FRONTEND_HOME_URL }),
-  (req: Request, res: Response) => {
-    const session = req.session as typeof req.session & { oauthRedirect?: string };
-    const redirect = session.oauthRedirect;
-    if (redirect) delete session.oauthRedirect;
-    res.redirect(redirect || process.env.FRONTEND_HOME_URL!);
+  (req: Request, res: Response, next: NextFunction) => {
+    passport.authenticate(
+      "discord",
+      (err: any, user: any, info: any) => {
+        if (err) {
+          console.error("OAuth error:", err);
+          return res.status(500).json({ error: "OAuth failed", details: err.message });
+        }
+        if (!user) {
+          console.warn("OAuth failed, info:", info);
+          return res.redirect("/auth/failure");
+        }
+        req.logIn(user, (loginErr: any) => {
+          if (loginErr) {
+            console.error("Login error:", loginErr);
+            return next(loginErr);
+          }
+          const session = req.session as typeof req.session & { oauthRedirect?: string };
+          const redirect = session.oauthRedirect;
+          if (redirect) delete session.oauthRedirect;
+          res.redirect(redirect || process.env.FRONTEND_HOME_URL!);
+        });
+      }
+    )(req, res, next);
   }
 );
+router.get("/auth/failure", (req, res) => {
+  res.send("OAuth failure occurred — check server logs for details.");
+});
 
 router.get("/me", async (req: Request, res: Response): Promise<void> => {
   if (!req.user) {
