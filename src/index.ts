@@ -46,45 +46,34 @@ const matchLimiter = rateLimit({
   message: { status: 429, error: 'Too many match requests – please slow down.' }
 });
 
+// ───── Middleware ─────
 app.use(cors({
   origin: (origin, callback) => {
-    // Allow requests with no origin (e.g., mobile apps, Postman)
     if (!origin) return callback(null, true);
 
-    // Debugging: Log incoming origin (remove in production)
-    console.log('Incoming origin:', origin);
-
-    const allowedDomains = [
-      'cipher.uno',
-      'www.cipher.uno',
+    const allowedHostnames = [
+      'localhost',
       'haya-pvp.vercel.app',
-      'localhost' // Covers all ports (localhost:3000, etc.)
     ];
 
     try {
       const url = new URL(origin);
       const hostname = url.hostname;
 
-      // Check against allowed domains
-      const isAllowed =
-        allowedDomains.some(domain => hostname === domain) || 
-        hostname.endsWith('.cipher.uno') ||                   
-        hostname.startsWith('localhost');                     
-
-      if (isAllowed) {
+      if (
+        hostname.endsWith('.cipher.uno') ||  
+        hostname === 'cipher.uno' ||        
+        allowedHostnames.includes(hostname)  
+      ) {
         return callback(null, true);
-      } else {
-        console.warn('Blocked origin:', origin); // Debug
-        return callback(new Error('Not allowed by CORS'));
       }
-    } catch (err) {
-      console.error('Invalid origin URL:', origin, err);
+    } catch (e) {
       return callback(new Error('Invalid origin'));
     }
+
+    callback(new Error('Not allowed by CORS'));
   },
-  credentials: true, // Required for cookies/sessions
-  methods: ['GET', 'POST', 'PUT', 'DELETE', 'OPTIONS'], // Allowed HTTP methods
-  allowedHeaders: ['Content-Type', 'Authorization'], // Allowed headers
+  credentials: true,
 }));
 
 /* ───── Sessions (PostgreSQL-backed) ───── */
@@ -1447,21 +1436,6 @@ app.get('/api/insights', async (req: Request, res: Response): Promise<void> => {
     res.status(500).json({ error: "Failed to load insights" });
   }
 });
-
-// Proxy getUsers from draft-api.cipher.uno to avoid CORS
-app.get('/api/roster/users', async (_req, res) => {
-  try {
-    const response = await fetch(`${process.env.YANYAN_API_URL}/getUsers`);
-    if (!response.ok) throw new Error(`Status ${response.status}`);
-    const data = await response.json();
-    res.json(data);
-  } catch (err) {
-    console.error("Failed to fetch roster users", err);
-    res.status(500).json({ error: 'Failed to fetch roster users' });
-  }
-});
-
-
 /* ─────────── health check ─────────── */
 app.get("/ping", (req, res) => {
   res.status(200).send("pong");
