@@ -29,23 +29,34 @@ router.post(
     }
 
     try {
-      const result = await pool.query(
-        `UPDATE players SET points = $1 WHERE discord_id = $2;`,
-        [points, discordId]
+      // Step 1: Fetch old points first
+      const { rows } = await pool.query(
+        `SELECT points FROM players WHERE discord_id = $1;`,
+        [discordId]
       );
 
-      await pool.query(
-        `INSERT INTO roster_log (discord_id, points) VALUES ($1, $2);`,
-        [discordId, points]
-      );
-
-      if (result.rowCount === 0) {
+      if (rows.length === 0) {
         res.status(200).json({
           success: false,
           message: "Player not found, no update performed",
         });
         return;
       }
+
+      const oldPoints = rows[0].points;
+
+      // Step 2: Update player points
+      await pool.query(
+        `UPDATE players SET points = $1 WHERE discord_id = $2;`,
+        [points, discordId]
+      );
+
+      // Step 3: Log change with old + new points
+      await pool.query(
+        `INSERT INTO roster_log (discord_id, old_points, new_points, submitted_at)
+         VALUES ($1, $2, $3, NOW());`,
+        [discordId, oldPoints, points]
+      );
 
       res.status(200).json({ success: true });
     } catch (err) {
