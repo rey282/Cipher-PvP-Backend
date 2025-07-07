@@ -1,4 +1,3 @@
-
 import express, { Request, Response } from "express";
 import { pool } from "../db";
 
@@ -25,31 +24,34 @@ router.post(
     const { discordId, points } = req.body;
 
     if (!discordId || typeof points !== "number" || points < 0) {
-        res.status(400).json({ error: "Missing or invalid fields" });
+      res.status(400).json({ error: "Missing or invalid fields" });
+      return;
+    }
+
+    try {
+      const result = await pool.query(
+        `UPDATE players SET points = $1 WHERE discord_id = $2;`,
+        [points, discordId]
+      );
+
+      await pool.query(
+        `INSERT INTO roster_log (discord_id, points) VALUES ($1, $2);`,
+        [discordId, points]
+      );
+
+      if (result.rowCount === 0) {
+        res.status(200).json({
+          success: false,
+          message: "Player not found, no update performed",
+        });
         return;
       }
-      
-      try {
-        const result = await pool.query(
-          `
-          UPDATE players
-             SET points = $1
-           WHERE discord_id = $2;
-          `,
-          [points, discordId]
-        );
-      
-        if (result.rowCount === 0) {
-          res.status(200).json({ success: false, message: "Player not found, no update performed" });
-          return;
-        }
-      
-        res.status(200).json({ success: true });
-      } catch (err) {
-        console.error("Error in /api/player/roster:", err);
-        res.status(500).json({ error: "Internal server error" });
-      }
-      
+
+      res.status(200).json({ success: true });
+    } catch (err) {
+      console.error("Error in /api/player/roster:", err);
+      res.status(500).json({ error: "Internal server error" });
+    }
   }
 );
 
