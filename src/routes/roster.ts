@@ -1,5 +1,6 @@
 import express, { Request, Response } from "express";
 import { pool } from "../db";
+import fetch from "node-fetch";
 
 const router = express.Router();
 const ROSTER_SECRET = process.env.ROSTER_SECRET_KEY;
@@ -65,5 +66,18 @@ router.post(
     }
   }
 );
+
+// Proxy getUsers from draft-api.cipher.uno to avoid CORS
+router.get('/api/roster/users', async (_req, res) => {
+  try {
+    const response = await fetch(`${process.env.YANYAN_API_URL}/getUsers`);
+    if (!response.ok) throw new Error(`Status ${response.status}`);
+    const data = await response.json();
+    res.json(data);
+  } catch (err) {
+    console.error("Failed to fetch roster users", err);
+    res.status(500).json({ error: 'Failed to fetch roster users' });
+  }
+});
 
 export default router;
