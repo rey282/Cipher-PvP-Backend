@@ -221,41 +221,43 @@ router.post("/api/admin/rollback/:matchId", requireAdmin, async (req, res) => {
 
 /* ─────────── GET /api/admin/roster-log ─────────── */
 router.get("/api/admin/roster-log", requireAdmin, async (req, res) => {
-    const { discordId, name } = req.query;
-  
-    let query = `
-      SELECT rl.id, rl.discord_id, rl.points, rl.submitted_at,
-             du.username, du.global_name
-        FROM roster_log rl
-   LEFT JOIN discord_usernames du ON rl.discord_id = du.discord_id
-    `;
-    const params: any[] = [];
-    const conditions: string[] = [];
-  
-    if (discordId) {
-      params.push(discordId);
-      conditions.push(`rl.discord_id = $${params.length}`);
-    }
-  
-    if (name) {
-      params.push(`%${name}%`);
-      conditions.push(`(du.username ILIKE $${params.length} OR du.global_name ILIKE $${params.length})`);
-    }
-  
-    if (conditions.length > 0) {
-      query += ` WHERE ${conditions.join(" AND ")}`;
-    }
-  
-    query += ` ORDER BY rl.submitted_at DESC`;
-  
-    try {
-      const { rows } = await pool.query(query, params);
-      res.json({ data: rows });
-    } catch (err) {
-      console.error("Error fetching roster log:", err);
-      res.status(500).json({ error: "Failed to fetch roster log" });
-    }
-  });
+  const { discordId, name } = req.query;
+
+  let query = `
+    SELECT rl.id, rl.discord_id, rl.old_points, rl.new_points, rl.submitted_at,
+           du.username, du.global_name
+      FROM roster_log rl
+ LEFT JOIN discord_usernames du ON rl.discord_id = du.discord_id
+  `;
+
+  const params: any[] = [];
+  const conditions: string[] = [];
+
+  if (discordId) {
+    params.push(discordId);
+    conditions.push(`rl.discord_id = $${params.length}`);
+  }
+
+  if (name) {
+    params.push(`%${name}%`);
+    conditions.push(`(du.username ILIKE $${params.length} OR du.global_name ILIKE $${params.length})`);
+  }
+
+  if (conditions.length > 0) {
+    query += ` WHERE ${conditions.join(" AND ")}`;
+  }
+
+  query += ` ORDER BY rl.submitted_at DESC`;
+
+  try {
+    const { rows } = await pool.query(query, params);
+    res.json({ data: rows });
+  } catch (err) {
+    console.error("Error fetching roster log:", err);
+    res.status(500).json({ error: "Failed to fetch roster log" });
+  }
+});
+
   
 
 export default router;
