@@ -6,17 +6,10 @@ import { CHARACTER_TABLE_MAP } from "../utils/seasons";
 const router = express.Router();
 const cache = new NodeCache({ stdTTL: 60 * 60 }); // 1 hour
 
-// Map for character table per cycle
-const tableMap: Record<string, string> = {
-  "0": "characters",
-  "1": "characters_1",
-  "2": "characters_2"
-};
-
 // GET /api/characters?cycle=0
 router.get("/api/characters", async (req, res) => {
   const cycle = req.query.cycle || "0";
-  const table = tableMap[cycle as string] ?? "characters";
+  const table = CHARACTER_TABLE_MAP[cycle as string] ?? "characters";
   const cacheKey = `characters_${cycle}`;
 
   const cached = cache.get(cacheKey);
