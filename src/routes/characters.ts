@@ -1,6 +1,7 @@
 import express from "express";
 import { pool } from "../db";
 import NodeCache from "node-cache";
+import { CHARACTER_TABLE_MAP } from "../utils/seasons";
 
 const router = express.Router();
 const cache = new NodeCache({ stdTTL: 60 * 60 }); // 1 hour
@@ -58,22 +59,23 @@ router.get("/api/characters/all", async (_req, res) => {
     return;
   }
 
+  // Dynamically build UNION for all tables in the map
+  const unionQuery = Object.values(CHARACTER_TABLE_MAP)
+    .map((table) => `SELECT * FROM ${table}`)
+    .join(" UNION ALL ");
+
   const q = `
     WITH u AS (
-      SELECT * FROM characters
-      UNION ALL
-      SELECT * FROM characters_1
-      UNION ALL
-      SELECT * FROM characters_2
+      ${unionQuery}
     ),
     grouped AS (
       SELECT
-        code, name, rarity, image_url, path, element,
+        code, name, subname, rarity, image_url, path, element,
         COALESCE(SUM(appearance_count),0)::int AS appearance_count,
-        COALESCE(SUM(pick_count)      ,0)::int AS pick_count,
-        COALESCE(SUM(ban_count)       ,0)::int AS ban_count,
-        COALESCE(SUM(preban_count)    ,0)::int AS preban_count,
-        COALESCE(SUM(joker_count)     ,0)::int AS joker_count,
+        COALESCE(SUM(pick_count),0)::int AS pick_count,
+        COALESCE(SUM(ban_count),0)::int AS ban_count,
+        COALESCE(SUM(preban_count),0)::int AS preban_count,
+        COALESCE(SUM(joker_count),0)::int AS joker_count,
         COALESCE(SUM(e0_uses),0)::int AS e0_uses,  COALESCE(SUM(e0_wins),0)::int AS e0_wins,
         COALESCE(SUM(e1_uses),0)::int AS e1_uses,  COALESCE(SUM(e1_wins),0)::int AS e1_wins,
         COALESCE(SUM(e2_uses),0)::int AS e2_uses,  COALESCE(SUM(e2_wins),0)::int AS e2_wins,
@@ -82,7 +84,7 @@ router.get("/api/characters/all", async (_req, res) => {
         COALESCE(SUM(e5_uses),0)::int AS e5_uses,  COALESCE(SUM(e5_wins),0)::int AS e5_wins,
         COALESCE(SUM(e6_uses),0)::int AS e6_uses,  COALESCE(SUM(e6_wins),0)::int AS e6_wins
       FROM u
-      GROUP BY code, name, rarity, image_url, path, element
+      GROUP BY code, name, subname, rarity, image_url, path, element
     )
     SELECT *,
            (e0_uses+e1_uses+e2_uses+e3_uses+e4_uses+e5_uses+e6_uses)::int AS total_uses,
@@ -97,7 +99,7 @@ router.get("/api/characters/all", async (_req, res) => {
     const { rows } = await pool.query(q);
     const response = {
       data: rows,
-      lastFetched: new Date().toISOString()
+      lastFetched: new Date().toISOString(),
     };
     cache.set(cacheKey, response);
     res.json(response);

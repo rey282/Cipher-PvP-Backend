@@ -1,4 +1,5 @@
 export type SeasonKey = "players" | "players_1" | "all";
+
 export type SeasonDef = {
   label: string;
   table: string;
@@ -11,6 +12,14 @@ export const SEASONS: Record<SeasonKey, SeasonDef> = {
   players_1: { label: "Season 1", table: "players_1", start: "2025-03-31", end: "2025-06-22" },
   all:       { label: "All-Time", table: "",          start: null,         end: null },
 };
+
+export const CHARACTER_TABLE_MAP: Record<string, string> = {
+  "0": "characters",
+  "1": "characters_1",
+  "2": "characters_2",
+  // add more as needed
+};
+
 
 export const seasonFromQuery = (q: any): SeasonDef => {
   const key = String(q);
