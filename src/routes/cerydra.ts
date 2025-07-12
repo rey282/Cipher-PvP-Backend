@@ -66,7 +66,7 @@ router.put("/api/admin/cerydra-balance", requireAdmin, async (req, res) => {
 router.get("/api/cerydra/cone-balance", async (_req, res) => {
   try {
     const { rows } = await pool.query(`
-      SELECT id, name, costs, image_url as "imageUrl", subname, rarity
+      SELECT id, name, costs, image_url as "imageUrl", subname, rarity, limited
       FROM cerydra_cone_costs
       ORDER BY rarity DESC, name ASC
     `);
@@ -78,6 +78,7 @@ router.get("/api/cerydra/cone-balance", async (_req, res) => {
       imageUrl: row.imageUrl,
       subname: row.subname,
       rarity: row.rarity,
+      limited: row.limited,
     }));
 
     res.json({ cones });
@@ -86,6 +87,7 @@ router.get("/api/cerydra/cone-balance", async (_req, res) => {
     res.status(500).json({ error: "Failed to fetch Cerydra cone balance data" });
   }
 });
+
 
 /* ─────────── PUT /api/admin/cerydra-cone-balance ─────────── */
 router.put("/api/admin/cerydra-cone-balance", requireAdmin, async (req, res) => {
