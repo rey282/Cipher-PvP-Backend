@@ -112,7 +112,9 @@ router.get("/api/player/:id/matches", matchLimiter, async (req, res) => {
 
     const matches = rows.map((r: any) => {
       const rd = r.raw_data;
-      const isRed = rd.red_team.some((m: any) => m.id === playerId);
+      const isRed = (rd.red_team || []).some((m: any) =>
+        String(m?.id ?? m["id"]) === String(playerId)
+      );
       const myTeam = isRed ? "red" : "blue";
       const oppTeam = isRed ? "blue" : "red";
 
@@ -148,6 +150,9 @@ router.get("/api/player/:id/matches", matchLimiter, async (req, res) => {
         oppCycles: (rd[`${oppTeam}_team`] || []).map((m: any) => m.cycles || 0),
         myCyclePenalty: isRed ? rd.red_penalty || 0 : rd.blue_penalty || 0,
         oppCyclePenalty: isRed ? rd.blue_penalty || 0 : rd.red_penalty || 0,
+        redTeam: rd.red_team || [],
+        blueTeam: rd.blue_team || [],
+        myTeamSide: isRed ? "red" : "blue",
       };
     });
 

@@ -127,7 +127,7 @@ router.get("/api/player/:id/summary", matchLimiter, async (req, res) => {
     const mostPrebanned = topN(combinedPrebans);
 
     const wrArr = Object.keys(charPlays)
-      .filter((code) => charPlays[code] >= 10)
+      .filter((code) => charPlays[code] >= 5)
       .map((code) => ({
         code,
         games: charPlays[code],
