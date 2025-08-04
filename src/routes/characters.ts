@@ -52,7 +52,6 @@ router.get("/api/characters/all", async (_req, res) => {
     return;
   }
 
-  // Dynamically build UNION for all tables in the map
   const unionQuery = Object.values(CHARACTER_TABLE_MAP)
     .map((table) => `SELECT * FROM ${table}`)
     .join(" UNION ALL ");
