@@ -17,6 +17,7 @@ export const CHARACTER_TABLE_MAP: Record<string, string> = {
   "0": "characters",
   "1": "characters_1",
   "2": "characters_2",
+  "3": "characters_3",
   // add more as needed
 };
 
