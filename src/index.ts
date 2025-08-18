@@ -22,6 +22,7 @@ import balanceRouter from "./routes/balance";
 import cerydraRouter from "./routes/cerydra";
 import insightsRouter from "./routes/insights";
 import zzzRouter from "./routes/zzz";
+import cipherCostRouter from "./routes/ciphercost";
 
 dotenv.config();
 
@@ -118,6 +119,7 @@ app.use(balanceRouter);
 app.use(cerydraRouter);
 app.use(insightsRouter);
 app.use("/api/zzz", zzzRouter);
+app.use(cipherCostRouter);
 
 // ───── Root + Cache ─────
 app.get("/", (_req: Request, res: Response) => {

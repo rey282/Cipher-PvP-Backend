@@ -6,7 +6,69 @@ import { SEASONS, seasonFromQuery, SeasonKey } from "../utils/seasons";
 const router = express.Router();
 const cache = new NodeCache({ stdTTL: 3600 });
 
-// GET /api/players
+/* ───────────── helper: ensure self-or-admin ───────────── */
+async function ensureSelfOrAdmin(
+  req: express.Request,
+  res: express.Response,
+  targetId: string
+): Promise<boolean> {
+  const viewer = req.user as { id?: string } | undefined;
+
+  if (!viewer || !viewer.id) {
+    res.status(401).json({ error: "Not logged in" });
+    return false;
+  }
+  if (!targetId) {
+    res.status(400).json({ error: "Missing :id parameter" });
+    return false;
+  }
+
+  // allow if self
+  if (viewer.id === targetId) return true;
+
+  try {
+    const r = await pool.query(
+      "SELECT 1 FROM admin_users WHERE discord_id = $1 LIMIT 1",
+      [viewer.id]
+    );
+    if ((r.rowCount ?? 0) > 0) return true;
+    res.status(403).json({ error: "Unauthorized" });
+    return false;
+  } catch (err) {
+    console.error("Self/Admin check failed:", err);
+    res.status(500).json({ error: "Failed to check permissions" });
+    return false;
+  }
+}
+
+/* ───────────── Team Preset helpers ───────────── */
+type PresetSlot = {
+  characterId: string;
+  eidolon: number;        // 0..6
+  lightConeId: string;    // "" allowed
+  superimpose: number;    // 1..5
+};
+
+function isSlot(x: any): x is PresetSlot {
+  return x &&
+    typeof x.characterId === "string" && x.characterId.length > 0 &&
+    Number.isInteger(x.eidolon) && x.eidolon >= 0 && x.eidolon <= 6 &&
+    typeof x.lightConeId === "string" &&
+    Number.isInteger(x.superimpose) && x.superimpose >= 1 && x.superimpose <= 5;
+}
+function isSlotsArray4(x: any): x is PresetSlot[] {
+  return Array.isArray(x) && x.length === 4 && x.every(isSlot);
+}
+function sanitizeName(name: any): string | null {
+  if (typeof name !== "string") return null;
+  const t = name.trim();
+  if (t.length < 1 || t.length > 40) return null;
+  return t;
+}
+
+/* ─────────────────────────────────────────────────────────
+   GET /api/players
+   ───────────────────────────────────────────────────────── */
 router.get("/api/players", async (req, res) => {
   const seasonKey = String(req.query.season);
   const season = seasonFromQuery(seasonKey);
@@ -35,7 +97,7 @@ router.get("/api/players", async (req, res) => {
                p.color,
                p.banner_url
         FROM ${season.table} p
-   LEFT JOIN discord_usernames d ON p.discord_id = d.discord_id
+   LEFT JOiN discord_usernames d ON p.discord_id = d.discord_id
     ORDER BY p.elo DESC;
       `;
 
@@ -95,7 +157,9 @@ router.get("/api/players", async (req, res) => {
   }
 });
 
-// GET /api/player/:id
+/* ─────────────────────────────────────────────────────────
+   GET /api/player/:id
+   ───────────────────────────────────────────────────────── */
 router.get("/api/player/:id", async (req, res) => {
   const { id } = req.params;
   const seasonKey = String(req.query.season ?? "players") as SeasonKey;
@@ -175,7 +239,9 @@ router.get("/api/player/:id", async (req, res) => {
   }
 });
 
-// PATCH /api/player/:id
+/* ─────────────────────────────────────────────────────────
+   PATCH /api/player/:id (self or admin)
+   ───────────────────────────────────────────────────────── */
 router.patch("/api/player/:id", async (req, res) => {
   const { id } = req.params;
   const { description, banner_url } = req.body as {
@@ -190,7 +256,7 @@ router.patch("/api/player/:id", async (req, res) => {
       `SELECT 1 FROM admin_users WHERE discord_id = $1`,
       [viewer?.id]
     );
-    const isAdmin = (result?.rowCount ?? 0) > 0;
+    const isAdmin = ((result?.rowCount ?? 0) > 0);
     if (!isAdmin) {
       res.sendStatus(403);
       return;
@@ -225,6 +291,313 @@ router.patch("/api/player/:id", async (req, res) => {
   } catch (err) {
     console.error("DB error (patch player)", err);
     res.status(500).json({ error: "Failed to update player" });
+  }
+});
+
+/* ─────────────────────────────────────────────────────────
+   Team Presets (self-or-admin)
+   GET    /api/player/:id/presets
+   POST   /api/player/:id/presets           { name, slots[4] }
+   PATCH  /api/player/:id/presets/:presetId { name?, slots?[4] }
+   DELETE /api/player/:id/presets/:presetId
+   ───────────────────────────────────────────────────────── */
+
+// GET /api/player/:id/presets
+router.get("/api/player/:id/presets", async (req, res) => {
+  const userId = req.params.id;
+  if (!(await ensureSelfOrAdmin(req, res, userId))) return;
+
+  try {
+    const { rows: presets } = await pool.query(
+      `SELECT id, name, description, updated_at
+         FROM team_presets
+        WHERE user_id = $1
+        ORDER BY updated_at DESC`,
+      [userId]
+    );
+
+    if (presets.length === 0) {
+      res.json({ presets: [] });
+      return;
+    }
+
+    const ids = presets.map((p: any) => p.id);
+    const { rows: slots } = await pool.query(
+      `SELECT preset_id, slot_index, character_id, eidolon, light_cone_id, superimpose
+         FROM team_preset_slots
+        WHERE preset_id = ANY($1::text[])`,
+      [ids]
+    );
+
+    const byPreset: Record<string, any[]> = {};
+    for (const s of slots) (byPreset[s.preset_id] ||= []).push(s);
+
+    const out = presets.map((p: any) => ({
+      id: p.id,
+      name: p.name,
+      description: p.description || "",
+      updated_at: p.updated_at,
+      slots: (byPreset[p.id] || [])
+        .sort((a, b) => a.slot_index - b.slot_index)
+        .map((s) => ({
+          characterId: s.character_id,
+          eidolon: s.eidolon,
+          lightConeId: s.light_cone_id,
+          superimpose: s.superimpose,
+        })),
+    }));
+
+    res.json({ presets: out });
+  } catch (err) {
+    console.error("GET presets error", err);
+    res.status(500).json({ error: "Failed to fetch presets" });
+  }
+});
+
+// POST /api/player/:id/presets  (Promise chain only in this one to satisfy TS overload)
+router.post("/api/player/:id/presets", (req, res) => {
+  const userId = req.params.id;
+
+  ensureSelfOrAdmin(req, res, userId)
+    .then((ok) => {
+      if (!ok) return; // response already sent
+      const name = sanitizeName(req.body?.name);
+      const slots = req.body?.slots;
+
+      if (!name) {
+        res.status(400).json({ error: "Invalid name" });
+        return;
+      }
+      if (!isSlotsArray4(slots)) {
+        res.status(400).json({ error: "slots must be an array of 4 valid slot objects" });
+        return;
+      }
+
+      return pool
+        .query(
+          `SELECT COUNT(*)::int AS cnt FROM team_presets WHERE user_id = $1`,
+          [userId]
+        )
+        .then(({ rows }) => {
+          const cnt = rows?.[0]?.cnt ?? 0;
+          if (cnt >= 20) {
+            res.status(409).json({ error: "Max presets reached (20)" });
+            return;
+          }
+          return pool.query("BEGIN").then(() =>
+            pool
+              .query(
+                `INSERT INTO team_presets (user_id, name, description)
+                VALUES ($1, $2, $3)
+                RETURNING id, name, description, updated_at`,
+                [userId, name, req.body?.description || ""]
+              )
+              .then(({ rows: created }) => {
+                const presetId = created[0].id as string;
+
+                const values: any[] = [];
+                const placeholders: string[] = [];
+                for (let i = 0; i < 4; i++) {
+                  const s = slots[i];
+                  values.push(presetId, i, s.characterId, s.eidolon, s.lightConeId, s.superimpose);
+                  const base = i * 6;
+                  placeholders.push(`($${base + 1}, $${base + 2}, $${base + 3}, $${base + 4}, $${base + 5}, $${base + 6})`);
+                }
+
+                return pool
+                  .query(
+                    `INSERT INTO team_preset_slots
+                      (preset_id, slot_index, character_id, eidolon, light_cone_id, superimpose)
+                     VALUES ${placeholders.join(",")}`,
+                    values
+                  )
+                  .then(() =>
+                    pool.query("COMMIT").then(() =>
+                      res.status(201).json({
+                        preset: {
+                          id: presetId,
+                          name: created[0].name,
+                          description: created[0].description,
+                          updated_at: created[0].updated_at,
+                          slots,
+                        },
+                      })
+                    )
+                  );
+              })
+              .catch((err) =>
+                pool.query("ROLLBACK").finally(() => {
+                  console.error("POST preset error", err);
+                  res.status(500).json({ error: "Failed to create preset" });
+                })
+              )
+          );
+        });
+    })
+    .catch((err) => {
+      console.error("POST preset outer error", err);
+      res.status(500).json({ error: "Failed to create preset" });
+    });
+});
+
+// PATCH /api/player/:id/presets/:presetId
+router.patch("/api/player/:id/presets/:presetId", async (req, res) => {
+  const userId = req.params.id;
+  const presetId = req.params.presetId;
+  if (!(await ensureSelfOrAdmin(req, res, userId))) return;
+
+  // verify ownership
+  const { rows: own } = await pool.query(
+    `SELECT user_id FROM team_presets WHERE id = $1`,
+    [presetId]
+  );
+  if (own.length === 0 || own[0].user_id !== userId) {
+    res.status(404).json({ error: "Preset not found" });
+    return;
+  }
+
+  const nameRaw = req.body?.name;
+  const slots = req.body?.slots;
+  const descriptionRaw = req.body?.description;
+
+  const name = nameRaw === undefined ? undefined : sanitizeName(nameRaw);
+  if (nameRaw !== undefined && !name) {
+    res.status(400).json({ error: "Invalid name" });
+    return;
+  }
+  if (slots !== undefined && !isSlotsArray4(slots)) {
+    res
+      .status(400)
+      .json({ error: "slots must be an array of 4 valid slot objects" });
+    return;
+  }
+
+  const description =
+    descriptionRaw === undefined ? undefined : String(descriptionRaw).trim();
+  if (description && description.split(/\s+/).length > 100) {
+    res.status(400).json({ error: "Description too long (max 100 words)" });
+    return;
+  }
+
+  try {
+    await pool.query("BEGIN");
+
+    if (name !== undefined) {
+      await pool.query(
+        `UPDATE team_presets SET name = $1, updated_at = now() WHERE id = $2`,
+        [name, presetId]
+      );
+    }
+
+    if (description !== undefined) {
+      await pool.query(
+        `UPDATE team_presets SET description = $1, updated_at = now() WHERE id = $2`,
+        [description, presetId]
+      );
+    }
+
+    if (slots !== undefined) {
+      await pool.query(
+        `DELETE FROM team_preset_slots WHERE preset_id = $1`,
+        [presetId]
+      );
+
+      const values: any[] = [];
+      const placeholders: string[] = [];
+      for (let i = 0; i < 4; i++) {
+        const s = slots[i];
+        values.push(
+          presetId,
+          i,
+          s.characterId,
+          s.eidolon,
+          s.lightConeId,
+          s.superimpose
+        );
+        const base = i * 6;
+        placeholders.push(
+          `($${base + 1}, $${base + 2}, $${base + 3}, $${base + 4}, $${base + 5}, $${base + 6})`
+        );
+      }
+
+      await pool.query(
+        `INSERT INTO team_preset_slots
+          (preset_id, slot_index, character_id, eidolon, light_cone_id, superimpose)
+         VALUES ${placeholders.join(",")}`,
+        values
+      );
+
+      await pool.query(
+        `UPDATE team_presets SET updated_at = now() WHERE id = $1`,
+        [presetId]
+      );
+    }
+
+    await pool.query("COMMIT");
+
+    const { rows } = await pool.query(
+      `SELECT p.id AS preset_id, p.name, p.description, p.updated_at,
+              s.slot_index, s.character_id, s.eidolon, s.light_cone_id, s.superimpose
+         FROM team_presets p
+    LEFT JOIN team_preset_slots s ON s.preset_id = p.id
+        WHERE p.id = $1
+        ORDER BY s.slot_index ASC`,
+      [presetId]
+    );
+
+    if (rows.length === 0) {
+      res.status(404).json({ error: "Preset not found" });
+      return;
+    }
+
+    const slotsOut = rows
+      .filter((r) => r.slot_index !== null)
+      .sort((a, b) => a.slot_index - b.slot_index)
+      .map((r) => ({
+        characterId: r.character_id,
+        eidolon: r.eidolon,
+        lightConeId: r.light_cone_id,
+        superimpose: r.superimpose,
+      }));
+
+    res.json({
+      preset: {
+        id: rows[0].preset_id,
+        name: rows[0].name,
+        description: rows[0].description || "",
+        updated_at: rows[0].updated_at,
+        slots: slotsOut,
+      },
+    });
+  } catch (err) {
+    await pool.query("ROLLBACK").catch(() => {});
+    console.error("PATCH preset error", err);
+    res.status(500).json({ error: "Failed to update preset" });
+  }
+});
+
+// DELETE /api/player/:id/presets/:presetId
+router.delete("/api/player/:id/presets/:presetId", async (req, res) => {
+  const userId = req.params.id;
+  const presetId = req.params.presetId;
+  if (!(await ensureSelfOrAdmin(req, res, userId))) return;
+
+  try {
+    // verify ownership
+    const { rows: own } = await pool.query(
+      `SELECT user_id FROM team_presets WHERE id = $1`,
+      [presetId]
+    );
+    if (own.length === 0 || own[0].user_id !== userId) {
+      res.status(404).json({ error: "Preset not found" });
+      return;
+    }
+
+    await pool.query(`DELETE FROM team_presets WHERE id = $1`, [presetId]);
+    res.status(204).end();
+  } catch (err) {
+    console.error("DELETE preset error", err);
+    res.status(500).json({ error: "Failed to delete preset" });
   }
 });
 
