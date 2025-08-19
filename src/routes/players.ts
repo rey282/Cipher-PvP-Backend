@@ -41,6 +41,15 @@ async function ensureSelfOrAdmin(
   }
 }
 
+function parseExpectedCycleInput(v: any): number | null {
+  // allow explicit null to clear the value
+  if (v === null) return null;
+  const n = Number(v);
+  if (!Number.isFinite(n) || !Number.isInteger(n) || n < 0) return NaN as any; // invalid
+  return n;
+}
+
+
 /* ───────────── Team Preset helpers ───────────── */
 type PresetSlot = {
   characterId: string;
@@ -309,12 +318,12 @@ router.get("/api/player/:id/presets", async (req, res) => {
 
   try {
     const { rows: presets } = await pool.query(
-      `SELECT id, name, description, updated_at
-         FROM team_presets
-        WHERE user_id = $1
-        ORDER BY updated_at DESC`,
-      [userId]
-    );
+    `SELECT id, name, description, expected_cycle, updated_at
+      FROM team_presets
+      WHERE user_id = $1
+      ORDER BY updated_at DESC`,
+    [userId]
+  );
 
     if (presets.length === 0) {
       res.json({ presets: [] });
@@ -337,6 +346,7 @@ router.get("/api/player/:id/presets", async (req, res) => {
       name: p.name,
       description: p.description || "",
       updated_at: p.updated_at,
+      expectedCycle: p.expected_cycle,
       slots: (byPreset[p.id] || [])
         .sort((a, b) => a.slot_index - b.slot_index)
         .map((s) => ({
@@ -373,6 +383,16 @@ router.post("/api/player/:id/presets", (req, res) => {
         return;
       }
 
+      const expectedCycleRaw = req.body?.expectedCycle;
+      let expectedCycle: number | null | undefined = undefined;
+      if (expectedCycleRaw !== undefined) {
+        expectedCycle = parseExpectedCycleInput(expectedCycleRaw);
+        if (Number.isNaN(expectedCycle as any)) {
+          res.status(400).json({ error: "Invalid expectedCycle (must be integer ≥ 0 or null)" });
+          return;
+        }
+      }
+
       return pool
         .query(
           `SELECT COUNT(*)::int AS cnt FROM team_presets WHERE user_id = $1`,
@@ -380,17 +400,17 @@ router.post("/api/player/:id/presets", (req, res) => {
         )
         .then(({ rows }) => {
           const cnt = rows?.[0]?.cnt ?? 0;
-          if (cnt >= 20) {
-            res.status(409).json({ error: "Max presets reached (20)" });
+          if (cnt >= 50) {
+            res.status(409).json({ error: "Max presets reached (50)" });
             return;
           }
           return pool.query("BEGIN").then(() =>
             pool
               .query(
-                `INSERT INTO team_presets (user_id, name, description)
-                VALUES ($1, $2, $3)
-                RETURNING id, name, description, updated_at`,
-                [userId, name, req.body?.description || ""]
+                `INSERT INTO team_presets (user_id, name, description, expected_cycle)
+                  VALUES ($1, $2, $3, $4)
+                  RETURNING id, name, description, expected_cycle, updated_at`,
+                  [ userId, name, req.body?.description || "", expectedCycle ?? null ]
               )
               .then(({ rows: created }) => {
                 const presetId = created[0].id as string;
@@ -419,6 +439,7 @@ router.post("/api/player/:id/presets", (req, res) => {
                           name: created[0].name,
                           description: created[0].description,
                           updated_at: created[0].updated_at,
+                          expectedCycle: created[0].expected_cycle,
                           slots,
                         },
                       })
@@ -456,6 +477,20 @@ router.patch("/api/player/:id/presets/:presetId", async (req, res) => {
     return;
   }
 
+  const expectedCycleRaw = req.body?.expectedCycle;
+  let expectedCycleProvided = false;
+  let expectedCycle: number | null = null;
+
+  if (expectedCycleRaw !== undefined) {
+    expectedCycleProvided = true;
+    expectedCycle = parseExpectedCycleInput(expectedCycleRaw);
+    if (Number.isNaN(expectedCycle as any)) {
+      res.status(400).json({ error: "Invalid expectedCycle (must be integer ≥ 0 or null)" });
+      return;
+    }
+  }
+
+
   const nameRaw = req.body?.name;
   const slots = req.body?.slots;
   const descriptionRaw = req.body?.description;
@@ -479,6 +514,7 @@ router.patch("/api/player/:id/presets/:presetId", async (req, res) => {
     return;
   }
 
+
   try {
     await pool.query("BEGIN");
 
@@ -495,6 +531,14 @@ router.patch("/api/player/:id/presets/:presetId", async (req, res) => {
         [description, presetId]
       );
     }
+
+    if (expectedCycleProvided) {
+      await pool.query(
+        `UPDATE team_presets SET expected_cycle = $1, updated_at = now() WHERE id = $2`,
+        [expectedCycle, presetId]
+      );
+    }
+
 
     if (slots !== undefined) {
       await pool.query(
@@ -536,9 +580,9 @@ router.patch("/api/player/:id/presets/:presetId", async (req, res) => {
     await pool.query("COMMIT");
 
     const { rows } = await pool.query(
-      `SELECT p.id AS preset_id, p.name, p.description, p.updated_at,
+      `SELECT p.id AS preset_id, p.name, p.description, p.expected_cycle, p.updated_at,
               s.slot_index, s.character_id, s.eidolon, s.light_cone_id, s.superimpose
-         FROM team_presets p
+        FROM team_presets p
     LEFT JOIN team_preset_slots s ON s.preset_id = p.id
         WHERE p.id = $1
         ORDER BY s.slot_index ASC`,
@@ -566,6 +610,7 @@ router.patch("/api/player/:id/presets/:presetId", async (req, res) => {
         name: rows[0].name,
         description: rows[0].description || "",
         updated_at: rows[0].updated_at,
+        expectedCycle: rows[0].expected_cycle,
         slots: slotsOut,
       },
     });
