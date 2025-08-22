@@ -16,7 +16,7 @@ router.get("/characters", async (_req, res) => {
   }
 
   const q = `
-    SELECT code, name, subname, rarity, image_url
+    SELECT code, name, subname, rarity, image_url, limited
     FROM zzz_characters
     ORDER BY rarity DESC, name ASC
   `;
@@ -45,7 +45,7 @@ router.get("/wengines", async (_req, res) => {
   }
 
   const q = `
-    SELECT id, name, subname, rarity, image_url
+    SELECT id, name, subname, rarity, image_url, limited
     FROM zzz_wengine
     ORDER BY rarity DESC, name ASC
   `;
@@ -63,5 +63,6 @@ router.get("/wengines", async (_req, res) => {
     res.status(500).json({ error: "Failed to fetch ZZZ W-Engines" });
   }
 });
+
 
 export default router;
