@@ -6,15 +6,17 @@ import { SEASONS, seasonFromQuery, SeasonKey } from "../utils/seasons";
 const router = express.Router();
 const cache = new NodeCache({ stdTTL: 3600 });
 
-/* ───────────── helper: ensure self-or-admin ───────────── */
-async function ensureSelfOrAdmin(
+/* ───────────── helper: ensure self OR superuser (no admin bypass) ───────────── */
+const SUPERUSER_ID = process.env.SUPERUSER_DISCORD_ID;
+
+async function ensureSelfOrSuperuser(
   req: express.Request,
   res: express.Response,
   targetId: string
 ): Promise<boolean> {
   const viewer = req.user as { id?: string } | undefined;
 
-  if (!viewer || !viewer.id) {
+  if (!viewer?.id) {
     res.status(401).json({ error: "Not logged in" });
     return false;
   }
@@ -23,23 +25,14 @@ async function ensureSelfOrAdmin(
     return false;
   }
 
-  // allow if self
-  if (viewer.id === targetId) return true;
+  // allow if self OR superuser
+  if (viewer.id === targetId || viewer.id === SUPERUSER_ID) return true;
 
-  try {
-    const r = await pool.query(
-      "SELECT 1 FROM admin_users WHERE discord_id = $1 LIMIT 1",
-      [viewer.id]
-    );
-    if ((r.rowCount ?? 0) > 0) return true;
-    res.status(403).json({ error: "Unauthorized" });
-    return false;
-  } catch (err) {
-    console.error("Self/Admin check failed:", err);
-    res.status(500).json({ error: "Failed to check permissions" });
-    return false;
-  }
+  // IMPORTANT: admins do NOT bypass here
+  res.status(403).json({ error: "Unauthorized: presets are private" });
+  return false;
 }
+
 
 function parseExpectedCycleInput(v: any): number | null {
   // allow explicit null to clear the value
@@ -314,7 +307,7 @@ router.patch("/api/player/:id", async (req, res) => {
 // GET /api/player/:id/presets
 router.get("/api/player/:id/presets", async (req, res) => {
   const userId = req.params.id;
-  if (!(await ensureSelfOrAdmin(req, res, userId))) return;
+  if (!(await ensureSelfOrSuperuser(req, res, userId))) return;
 
   try {
     const { rows: presets } = await pool.query(
@@ -368,7 +361,7 @@ router.get("/api/player/:id/presets", async (req, res) => {
 router.post("/api/player/:id/presets", (req, res) => {
   const userId = req.params.id;
 
-  ensureSelfOrAdmin(req, res, userId)
+  ensureSelfOrSuperuser(req, res, userId)
     .then((ok) => {
       if (!ok) return; // response already sent
       const name = sanitizeName(req.body?.name);
@@ -465,7 +458,7 @@ router.post("/api/player/:id/presets", (req, res) => {
 router.patch("/api/player/:id/presets/:presetId", async (req, res) => {
   const userId = req.params.id;
   const presetId = req.params.presetId;
-  if (!(await ensureSelfOrAdmin(req, res, userId))) return;
+  if (!(await ensureSelfOrSuperuser(req, res, userId))) return;
 
   // verify ownership
   const { rows: own } = await pool.query(
@@ -625,7 +618,7 @@ router.patch("/api/player/:id/presets/:presetId", async (req, res) => {
 router.delete("/api/player/:id/presets/:presetId", async (req, res) => {
   const userId = req.params.id;
   const presetId = req.params.presetId;
-  if (!(await ensureSelfOrAdmin(req, res, userId))) return;
+  if (!(await ensureSelfOrSuperuser(req, res, userId))) return;
 
   try {
     // verify ownership
