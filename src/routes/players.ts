@@ -5,6 +5,7 @@ import { SEASONS, seasonFromQuery, SeasonKey } from "../utils/seasons";
 
 const router = express.Router();
 const cache = new NodeCache({ stdTTL: 3600 });
+const MAX_PRESET_DESC_LEN = 300;
 
 /* ───────────── helper: ensure self OR superuser (no admin bypass) ───────────── */
 const SUPERUSER_ID = process.env.SUPERUSER_DISCORD_ID;
@@ -366,6 +367,12 @@ router.post("/api/player/:id/presets", (req, res) => {
       if (!ok) return; // response already sent
       const name = sanitizeName(req.body?.name);
       const slots = req.body?.slots;
+      const rawDesc = typeof req.body?.description === "string" ? req.body.description : "";
+      const description = rawDesc.trim();
+      if (description.length > MAX_PRESET_DESC_LEN) {
+        res.status(400).json({ error: `Description too long (max ${MAX_PRESET_DESC_LEN} characters)` });
+        return;
+      }
 
       if (!name) {
         res.status(400).json({ error: "Invalid name" });
@@ -403,7 +410,7 @@ router.post("/api/player/:id/presets", (req, res) => {
                 `INSERT INTO team_presets (user_id, name, description, expected_cycle)
                   VALUES ($1, $2, $3, $4)
                   RETURNING id, name, description, expected_cycle, updated_at`,
-                  [ userId, name, req.body?.description || "", expectedCycle ?? null ]
+                  [ userId, name, description || "", expectedCycle ?? null ]
               )
               .then(({ rows: created }) => {
                 const presetId = created[0].id as string;
@@ -442,7 +449,11 @@ router.post("/api/player/:id/presets", (req, res) => {
               .catch((err) =>
                 pool.query("ROLLBACK").finally(() => {
                   console.error("POST preset error", err);
-                  res.status(500).json({ error: "Failed to create preset" });
+                  if ((err as any)?.code === "23505") {
+                    res.status(409).json({ error: "A preset with this name already exists." });
+                  } else {
+                    res.status(500).json({ error: "Failed to create preset" });
+                  }
                 })
               )
           );
@@ -502,10 +513,12 @@ router.patch("/api/player/:id/presets/:presetId", async (req, res) => {
 
   const description =
     descriptionRaw === undefined ? undefined : String(descriptionRaw).trim();
-  if (description && description.split(/\s+/).length > 100) {
-    res.status(400).json({ error: "Description too long (max 100 words)" });
+
+  if (typeof description === "string" && description.length > MAX_PRESET_DESC_LEN) {
+    res.status(400).json({ error: `Description too long (max ${MAX_PRESET_DESC_LEN} characters)` });
     return;
   }
+
 
 
   try {
@@ -610,7 +623,11 @@ router.patch("/api/player/:id/presets/:presetId", async (req, res) => {
   } catch (err) {
     await pool.query("ROLLBACK").catch(() => {});
     console.error("PATCH preset error", err);
-    res.status(500).json({ error: "Failed to update preset" });
+    if ((err as any)?.code === "23505") {
+      res.status(409).json({ error: "A preset with this name already exists." });
+    } else {
+      res.status(500).json({ error: "Failed to update preset" });
+    }
   }
 });
 
