@@ -656,4 +656,33 @@ router.delete("/api/player/:id/presets/:presetId", async (req, res) => {
   }
 });
 
+router.delete("/api/player/:id/presets", async (req, res) => {
+  const userId = req.params.id;
+  if (!(await ensureSelfOrSuperuser(req, res, userId))) return;
+
+  try {
+    await pool.query("BEGIN");
+
+    await pool.query(`
+      DELETE FROM team_preset_slots
+      USING team_presets p
+      WHERE team_preset_slots.preset_id = p.id
+        AND p.user_id = $1
+    `, [userId]);
+
+    const { rows } = await pool.query(
+      `DELETE FROM team_presets WHERE user_id = $1 RETURNING id`,
+      [userId]
+    );
+
+    await pool.query("COMMIT");
+
+    res.json({ deleted: rows.length, presetIds: rows.map(r => r.id) });
+  } catch (err) {
+    await pool.query("ROLLBACK").catch(() => {});
+    console.error("DELETE ALL presets error", err);
+    res.status(500).json({ error: "Failed to delete all presets" });
+  }
+});
+
 export default router;
