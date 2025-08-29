@@ -74,6 +74,24 @@ router.post("/api/zzz/sessions", requireLogin, async (req, res): Promise<void> =
     res.status(400).json({ error: "Missing or invalid body" });
     return;
   }
+  // BEFORE generating a new key, check if the owner already has an unfinished session.
+  const existing = await pool.query(
+    `SELECT session_key, mode, team1, team2, state, is_complete, last_activity_at, completed_at
+      FROM zzz_draft_sessions
+      WHERE owner_user_id = $1::text
+        AND is_complete IS NOT TRUE
+      ORDER BY last_activity_at DESC
+      LIMIT 1`,
+    [viewer.id]
+  );
+
+  if (existing.rows.length) {
+    const ex = existing.rows[0];
+    const url = `${process.env.PUBLIC_BASE_URL || "https://cipher.uno"}/zzz/s/${ex.session_key}`;
+    // Return the existing session instead of creating a new one
+    res.json({ key: ex.session_key, url, reused: true });
+    return;
+  }
 
   const key = genKey(22);
 
@@ -146,6 +164,44 @@ router.put("/api/zzz/sessions/:key", requireLogin, async (req, res): Promise<voi
     res.status(500).json({ error: "Failed to update session" });
   }
 });
+
+/* ───────────────── OWNER: fetch my open (unfinished) session ───────────────── */
+router.get("/api/zzz/sessions/open", requireLogin, async (req, res): Promise<void> => {
+  const viewer = (req as any).user as { id: string };
+
+  try {
+    const { rows } = await pool.query(
+      `SELECT session_key, mode, team1, team2, state, is_complete, last_activity_at, completed_at
+         FROM zzz_draft_sessions
+        WHERE owner_user_id = $1::text
+          AND is_complete IS NOT TRUE
+        ORDER BY last_activity_at DESC
+        LIMIT 1`,
+      [viewer.id]
+    );
+
+    if (rows.length === 0) {
+      res.status(404).json({ error: "No open session" });
+      return;
+    }
+
+    const r = rows[0];
+    res.json({
+      key: r.session_key,
+      mode: r.mode,
+      team1: r.team1,
+      team2: r.team2,
+      state: r.state,
+      is_complete: r.is_complete,
+      last_activity_at: r.last_activity_at,
+      completed_at: r.completed_at,
+    });
+  } catch (e) {
+    console.error(e);
+    res.status(500).json({ error: "Failed to load open session" });
+  }
+});
+
 
 /* ───────────────── READ one session (public) ───────────────── */
 router.get("/api/zzz/sessions/:key", async (req, res): Promise<void> => {
