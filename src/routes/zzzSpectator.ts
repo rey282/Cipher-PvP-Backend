@@ -15,6 +15,25 @@ const requireLogin: RequestHandler = (req, res, next) => {
   next();
 };
 
+// Shared draft JSON shapes (match what the frontend sends/stores)
+type ZzzMode = "2v2" | "3v3";
+
+interface ServerPick {
+  characterCode: string;
+  eidolon: number;        // 0..6
+  wengineId: string | null;
+  superimpose: number;    // 1..5
+}
+
+interface SpectatorState {
+  draftSequence: string[];
+  currentTurn: number;
+  picks: (ServerPick | null)[];
+  blueScores: number[];
+  redScores: number[];
+}
+
+
 /* ───────────────── SSE Hub ───────────────── */
 type Client = import("express").Response;
 const clients = new Map<string, Set<Client>>();
@@ -341,5 +360,157 @@ router.get("/api/zzz/sessions/:key/stream", async (req, res): Promise<void> => {
   const ping = setInterval(() => res.write(": keep-alive\n\n"), 25_000);
   req.on("close", () => clearInterval(ping));
 });
+
+// Add under other imports / router setup in routes/zzzSpectator.ts
+
+// ───────────────── PLAYER ACTIONS (public) ─────────────────
+// Body: { op: 'pick'|'setMindscape'|'setSuperimpose'|'setWengine',
+//         side: 'B'|'R',
+//         index: number,
+//         characterCode?: string,
+//         eidolon?: number,
+//         superimpose?: number,
+//         wengineId?: string|null }
+router.post("/api/zzz/sessions/:key/actions", async (req, res): Promise<void> => {
+  const { key } = req.params as { key: string };
+  const { op, side, index, characterCode, eidolon, superimpose, wengineId } = req.body || {};
+
+  if (side !== "B" && side !== "R") {
+    res.status(400).json({ error: "Invalid side" });
+    return;
+  }
+  if (!Number.isInteger(index) || index < 0) {
+    res.status(400).json({ error: "Invalid index" });
+    return;
+  }
+
+  try {
+    const q = await pool.query(
+      `SELECT mode, team1, team2, state, is_complete
+         FROM zzz_draft_sessions
+        WHERE session_key = $1::text`,
+      [key]
+    );
+    if (q.rows.length === 0) {
+      res.status(404).json({ error: "Session not found" });
+      return;
+    }
+    const row = q.rows[0];
+    if (row.is_complete === true) {
+      res.status(409).json({ error: "Draft already completed" });
+      return;
+    }
+
+    const state = row.state as SpectatorState;
+    if (!isValidState(state)) {
+      res.status(500).json({ error: "Corrupt state" });
+      return;
+    }
+    if (index >= state.draftSequence.length) {
+      res.status(400).json({ error: "Index out of range" });
+      return;
+    }
+
+    const slotToken = state.draftSequence[index]; // e.g. 'B', 'RR', 'B(ACE)'
+    const slotSide = slotToken.startsWith("B") ? "B" : slotToken.startsWith("R") ? "R" : "";
+    const isBan = slotToken === "BB" || slotToken === "RR";
+
+    // ── Enforce permissions / flow ──────────────────────────
+    if (op === "pick") {
+      // Only at current turn, for the right side, and not a ban slot
+      if (index !== state.currentTurn) {
+        res.status(409).json({ error: "Not current turn" });
+        return;
+      }
+      if (isBan) {
+        res.status(400).json({ error: "Cannot pick on ban slot" });
+        return;
+      }
+      if (slotSide !== side) {
+        res.status(403).json({ error: "Wrong side for this turn" });
+        return;
+      }
+      if (typeof characterCode !== "string" || !characterCode) {
+        res.status(400).json({ error: "Missing characterCode" });
+        return;
+      }
+      // Enforce unique-per-side (except ACE mirror rules if you have special cases)
+      const mySideCodes = state.picks
+        .map<string | null>((p, i) =>
+          state.draftSequence[i]?.startsWith(side) ? (p ? p.characterCode : null) : null
+        )
+        .filter((v): v is string => typeof v === "string");
+
+      if (mySideCodes.includes(characterCode)) {
+        res.status(409).json({ error: "Character already picked by this side" });
+        return;
+      }
+      // Apply pick
+      const newPick: ServerPick = {
+        characterCode,
+        eidolon: 0,
+        wengineId: null,
+        superimpose: 1,
+      };
+      state.picks[index] = newPick;
+      state.currentTurn = Math.min(state.currentTurn + 1, state.draftSequence.length);
+    } else if (op === "setMindscape") {
+      if (slotSide !== side || isBan) {
+        res.status(403).json({ error: "Cannot edit opponent or ban slot" });
+        return;
+      }
+      const slot = state.picks[index];
+      if (!slot) {
+        res.status(409).json({ error: "No character in slot" });
+        return;
+      }
+      const m = Math.max(0, Math.min(6, Number(eidolon ?? 0)));
+      slot.eidolon = m;
+    } else if (op === "setSuperimpose") {
+      if (slotSide !== side || isBan) {
+        res.status(403).json({ error: "Cannot edit opponent or ban slot" });
+        return;
+      }
+      const slot = state.picks[index];
+      if (!slot) {
+        res.status(409).json({ error: "No character in slot" });
+        return;
+      }
+      const p = Math.max(1, Math.min(5, Number(superimpose ?? 1)));
+      slot.superimpose = p;
+    } else if (op === "setWengine") {
+      if (slotSide !== side || isBan) {
+        res.status(403).json({ error: "Cannot edit opponent or ban slot" });
+        return;
+      }
+      const slot = state.picks[index];
+      if (!slot) {
+        res.status(409).json({ error: "No character in slot" });
+        return;
+      }
+      // allow null to clear
+      slot.wengineId = wengineId == null || wengineId === "" ? null : String(wengineId);
+    } else {
+      res.status(400).json({ error: "Invalid op" });
+      return;
+    }
+
+    // Persist & notify
+    const upd = await pool.query(
+      `UPDATE zzz_draft_sessions
+          SET state = $2::jsonb,
+              last_activity_at = now()
+        WHERE session_key = $1::text
+        RETURNING mode, team1, team2, state, is_complete, last_activity_at, completed_at`,
+      [key, JSON.stringify(state)]
+    );
+    if (upd.rows.length) push(key, "update", upd.rows[0]);
+    res.json({ ok: true });
+  } catch (e) {
+    console.error(e);
+    res.status(500).json({ error: "Failed to apply action" });
+  }
+});
+
 
 export default router;
