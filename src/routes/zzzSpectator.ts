@@ -31,6 +31,8 @@ interface SpectatorState {
   picks: (ServerPick | null)[];
   blueScores: number[];
   redScores: number[];
+  blueLocked?: boolean;   
+  redLocked?: boolean;
 }
 
 
@@ -83,6 +85,14 @@ function isValidState(s: any): boolean {
   );
   return okPicks;
 }
+
+// ───────── helpers (put near your other helpers)
+const isBanToken = (tok: string) => tok === "BB" || tok === "RR";
+const sideOfToken = (tok: string) =>
+  tok?.startsWith("B") ? "B" : tok?.startsWith("R") ? "R" : "";
+const sideLocked = (s: SpectatorState, side: "B" | "R") =>
+  side === "B" ? !!s.blueLocked : !!s.redLocked;
+
 
 /* ───────────────── CREATE session ───────────────── */
 router.post("/api/zzz/sessions", requireLogin, async (req, res): Promise<void> => {
@@ -361,27 +371,42 @@ router.get("/api/zzz/sessions/:key/stream", async (req, res): Promise<void> => {
   req.on("close", () => clearInterval(ping));
 });
 
-// Add under other imports / router setup in routes/zzzSpectator.ts
-
 // ───────────────── PLAYER ACTIONS (public) ─────────────────
-// Body: { op: 'pick'|'setMindscape'|'setSuperimpose'|'setWengine',
+// Body: { op: 'pick'|'setMindscape'|'setSuperimpose'|'setWengine'|'setLock'|'undoLast',
 //         side: 'B'|'R',
-//         index: number,
+//         index?: number,
 //         characterCode?: string,
 //         eidolon?: number,
 //         superimpose?: number,
-//         wengineId?: string|null }
+//         wengineId?: string|null,
+//         locked?: boolean }
 router.post("/api/zzz/sessions/:key/actions", async (req, res): Promise<void> => {
   const { key } = req.params as { key: string };
   const { op, side, index, characterCode, eidolon, superimpose, wengineId } = req.body || {};
 
   if (side !== "B" && side !== "R") {
-    res.status(400).json({ error: "Invalid side" });
-    return;
+    return void res.status(400).json({ error: "Invalid side" });
   }
-  if (!Number.isInteger(index) || index < 0) {
-    res.status(400).json({ error: "Invalid index" });
-    return;
+
+  // Helpers available to this handler
+  const sideOfToken = (tok: string) => (tok?.startsWith("B") ? "B" : tok?.startsWith("R") ? "R" : "");
+  const isBanToken  = (tok: string) => tok === "BB" || tok === "RR";
+  const sideLocked  = (state: SpectatorState, s: "B" | "R") => (s === "B" ? !!state.blueLocked : !!state.redLocked);
+
+  // Only some ops need an index
+  const opsThatNeedIndex = new Set< string >([
+    "pick",
+    "setMindscape",
+    "setSuperimpose",
+    "setWengine",
+    // (NOT: setLock, undoLast)
+  ]);
+  const opNeedsIndex = opsThatNeedIndex.has(op);
+
+  if (opNeedsIndex) {
+    if (!Number.isInteger(index) || index! < 0) {
+      return void res.status(400).json({ error: "Invalid index" });
+    }
   }
 
   try {
@@ -392,49 +417,35 @@ router.post("/api/zzz/sessions/:key/actions", async (req, res): Promise<void> =>
       [key]
     );
     if (q.rows.length === 0) {
-      res.status(404).json({ error: "Session not found" });
-      return;
+      return void res.status(404).json({ error: "Session not found" });
     }
+
     const row = q.rows[0];
     if (row.is_complete === true) {
-      res.status(409).json({ error: "Draft already completed" });
-      return;
+      return void res.status(409).json({ error: "Draft already completed" });
     }
 
     const state = row.state as SpectatorState;
     if (!isValidState(state)) {
-      res.status(500).json({ error: "Corrupt state" });
-      return;
-    }
-    if (index >= state.draftSequence.length) {
-      res.status(400).json({ error: "Index out of range" });
-      return;
+      return void res.status(500).json({ error: "Corrupt state" });
     }
 
-    const slotToken = state.draftSequence[index]; // e.g. 'B', 'RR', 'B(ACE)'
-    const slotSide = slotToken.startsWith("B") ? "B" : slotToken.startsWith("R") ? "R" : "";
-    const isBan = slotToken === "BB" || slotToken === "RR";
+    // Accessors for index-based ops
+    const slotToken = opNeedsIndex ? state.draftSequence[index as number] : "";
+    const slotSide  = opNeedsIndex ? sideOfToken(slotToken) : "";
+    const isBan     = opNeedsIndex ? isBanToken(slotToken) : false;
 
-    // ── Enforce permissions / flow ──────────────────────────
+    // ── Ops ──────────────────────────────────────────────────────────────
     if (op === "pick") {
-      // Only at current turn, for the right side, and not a ban slot
-      if (index !== state.currentTurn) {
-        res.status(409).json({ error: "Not current turn" });
-        return;
-      }
-      if (isBan) {
-        res.status(400).json({ error: "Cannot pick on ban slot" });
-        return;
-      }
-      if (slotSide !== side) {
-        res.status(403).json({ error: "Wrong side for this turn" });
-        return;
-      }
+      if (sideLocked(state, side)) return void res.status(409).json({ error: "Side locked" });
+      if (index !== state.currentTurn) return void res.status(409).json({ error: "Not current turn" });
+      if (isBan) return void res.status(400).json({ error: "Cannot pick on ban slot" });
+      if (slotSide !== side) return void res.status(403).json({ error: "Wrong side for this turn" });
       if (typeof characterCode !== "string" || !characterCode) {
-        res.status(400).json({ error: "Missing characterCode" });
-        return;
+        return void res.status(400).json({ error: "Missing characterCode" });
       }
-      // Enforce unique-per-side (except ACE mirror rules if you have special cases)
+
+      // enforce unique-per-side
       const mySideCodes = state.picks
         .map<string | null>((p, i) =>
           state.draftSequence[i]?.startsWith(side) ? (p ? p.characterCode : null) : null
@@ -442,60 +453,78 @@ router.post("/api/zzz/sessions/:key/actions", async (req, res): Promise<void> =>
         .filter((v): v is string => typeof v === "string");
 
       if (mySideCodes.includes(characterCode)) {
-        res.status(409).json({ error: "Character already picked by this side" });
-        return;
+        return void res.status(409).json({ error: "Character already picked by this side" });
       }
-      // Apply pick
-      const newPick: ServerPick = {
+
+      state.picks[index as number] = {
         characterCode,
         eidolon: 0,
         wengineId: null,
         superimpose: 1,
       };
-      state.picks[index] = newPick;
       state.currentTurn = Math.min(state.currentTurn + 1, state.draftSequence.length);
+
     } else if (op === "setMindscape") {
-      if (slotSide !== side || isBan) {
-        res.status(403).json({ error: "Cannot edit opponent or ban slot" });
-        return;
-      }
-      const slot = state.picks[index];
-      if (!slot) {
-        res.status(409).json({ error: "No character in slot" });
-        return;
-      }
-      const m = Math.max(0, Math.min(6, Number(eidolon ?? 0)));
-      slot.eidolon = m;
+      if (sideLocked(state, side)) return void res.status(409).json({ error: "Side locked" });
+      if (slotSide !== side || isBan) return void res.status(403).json({ error: "Cannot edit opponent or ban slot" });
+      const slot = state.picks[index as number];
+      if (!slot) return void res.status(409).json({ error: "No character in slot" });
+      slot.eidolon = Math.max(0, Math.min(6, Number(eidolon ?? 0)));
+
     } else if (op === "setSuperimpose") {
-      if (slotSide !== side || isBan) {
-        res.status(403).json({ error: "Cannot edit opponent or ban slot" });
-        return;
-      }
-      const slot = state.picks[index];
-      if (!slot) {
-        res.status(409).json({ error: "No character in slot" });
-        return;
-      }
-      const p = Math.max(1, Math.min(5, Number(superimpose ?? 1)));
-      slot.superimpose = p;
+      if (sideLocked(state, side)) return void res.status(409).json({ error: "Side locked" });
+      if (slotSide !== side || isBan) return void res.status(403).json({ error: "Cannot edit opponent or ban slot" });
+      const slot = state.picks[index as number];
+      if (!slot) return void res.status(409).json({ error: "No character in slot" });
+      slot.superimpose = Math.max(1, Math.min(5, Number(superimpose ?? 1)));
+
     } else if (op === "setWengine") {
-      if (slotSide !== side || isBan) {
-        res.status(403).json({ error: "Cannot edit opponent or ban slot" });
-        return;
-      }
-      const slot = state.picks[index];
-      if (!slot) {
-        res.status(409).json({ error: "No character in slot" });
-        return;
-      }
-      // allow null to clear
+      if (sideLocked(state, side)) return void res.status(409).json({ error: "Side locked" });
+      if (slotSide !== side || isBan) return void res.status(403).json({ error: "Cannot edit opponent or ban slot" });
+      const slot = state.picks[index as number];
+      if (!slot) return void res.status(409).json({ error: "No character in slot" });
       slot.wengineId = wengineId == null || wengineId === "" ? null : String(wengineId);
+
+    } else if (op === "setLock") {
+      const { locked } = req.body || {};
+      if (typeof locked !== "boolean") return void res.status(400).json({ error: "Missing 'locked' boolean" });
+      if (locked === false) return void res.status(403).json({ error: "Unlock not allowed here" });
+
+      // Only after draft is complete
+      if (state.currentTurn < state.draftSequence.length) {
+        return void res.status(409).json({ error: "Draft not complete" });
+      }
+
+      if (side === "B") state.blueLocked = true;
+      else state.redLocked = true;
+
+    } else if (op === "undoLast") {
+      const lastIdx = state.currentTurn - 1;
+      if (lastIdx < 0) return void res.status(409).json({ error: "Nothing to undo" });
+
+      // If client sent index, require it to match the last turn for safety
+      if (Number.isInteger(index) && index !== lastIdx) {
+        return void res.status(400).json({ error: "Index must equal last turn" });
+      }
+
+      const lastTok = state.draftSequence[lastIdx];
+      if (isBanToken(lastTok)) return void res.status(400).json({ error: "Cannot undo a ban slot" });
+
+      // Check lock for the side attempting undo
+      if (sideLocked(state, side)) return void res.status(409).json({ error: "Side locked" });
+
+      const lastSide = sideOfToken(lastTok);
+      if (lastSide !== side) return void res.status(403).json({ error: "Wrong side for undo" });
+
+      if (!state.picks[lastIdx]) return void res.status(409).json({ error: "Slot already empty" });
+      state.picks[lastIdx] = null;
+      state.currentTurn = lastIdx;
+
     } else {
-      res.status(400).json({ error: "Invalid op" });
-      return;
+      return void res.status(400).json({ error: "Invalid op" });
     }
 
-    // Persist & notify
+    // ── Persist & notify ────────────────────────────────────────────────
     const upd = await pool.query(
       `UPDATE zzz_draft_sessions
           SET state = $2::jsonb,
@@ -504,6 +533,7 @@ router.post("/api/zzz/sessions/:key/actions", async (req, res): Promise<void> =>
         RETURNING mode, team1, team2, state, is_complete, last_activity_at, completed_at`,
       [key, JSON.stringify(state)]
     );
+
     if (upd.rows.length) push(key, "update", upd.rows[0]);
     res.json({ ok: true });
   } catch (e) {
