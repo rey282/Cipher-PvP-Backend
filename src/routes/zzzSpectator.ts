@@ -307,7 +307,7 @@ router.get("/api/zzz/matches/live", async (req, res): Promise<void> => {
   const limit = Number.isFinite(rawLimit) ? Math.max(1, Math.min(25, rawLimit)) : 8;
 
   const rawMinutes = Number(req.query.minutes);
-  const minutes = Number.isFinite(rawMinutes) && rawMinutes > 0 ? rawMinutes : 2;
+  const minutes = Number.isFinite(rawMinutes) && rawMinutes > 0 ? rawMinutes : 120;
 
   try {
     const { rows } = await pool.query(
