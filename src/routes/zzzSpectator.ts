@@ -542,5 +542,54 @@ router.post("/api/zzz/sessions/:key/actions", async (req, res): Promise<void> =>
   }
 });
 
+/* ───────────────── DELETE unfinished session (owner only) ───────────────── */
+router.delete("/api/zzz/sessions/:key", requireLogin, async (req, res): Promise<void> => {
+  const viewer = (req as any).user as { id: string };
+  const { key } = req.params as { key: string };
+
+  try {
+    const chk = await pool.query(
+      `SELECT owner_user_id, is_complete
+         FROM zzz_draft_sessions
+        WHERE session_key = $1::text`,
+      [key]
+    );
+
+    if (chk.rows.length === 0) {
+      res.status(404).json({ error: "Session not found" });
+      return;
+    }
+    const row = chk.rows[0];
+    if (row.owner_user_id !== viewer.id) {
+      res.status(403).json({ error: "Forbidden" });
+      return;
+    }
+    if (row.is_complete === true) {
+      res.status(409).json({ error: "Cannot delete a completed session" });
+      return;
+    }
+
+    const del = await pool.query(
+      `DELETE FROM zzz_draft_sessions
+        WHERE session_key = $1::text
+          AND owner_user_id = $2::text
+          AND (is_complete IS NOT TRUE)
+        RETURNING session_key`,
+      [key, viewer.id]
+    );
+
+    if (del.rows.length === 0) {
+      res.status(404).json({ error: "Session not found or already finalized" });
+      return;
+    }
+
+    push(key, "deleted", { key });
+    res.json({ ok: true });
+  } catch (e) {
+    console.error(e);
+    res.status(500).json({ error: "Failed to delete session" });
+  }
+});
+
 
 export default router;
