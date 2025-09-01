@@ -58,7 +58,7 @@ function push(key: string, event: string, payload: any) {
 
 async function snapshotAndPush(key: string) {
   const { rows } = await pool.query(
-    `SELECT mode, team1, team2, state, is_complete, last_activity_at, completed_at
+    `SELECT mode, team1, team2, state, featured, is_complete, last_activity_at, completed_at
        FROM zzz_draft_sessions
       WHERE session_key = $1::text`,
     [key]
@@ -94,7 +94,7 @@ const sideLocked = (s: SpectatorState, side: "B" | "R") =>
 /* ───────────────── CREATE session ───────────────── */
 router.post("/api/zzz/sessions", requireLogin, async (req, res): Promise<void> => {
   const viewer = (req as any).user as { id: string };
-  const { team1, team2, mode, state } = req.body || {};
+  const { team1, team2, mode, state, featured } = req.body || {};
 
   if (!team1 || !team2 || (mode !== "2v2" && mode !== "3v3") || !state || !isValidState(state)) {
     res.status(400).json({ error: "Missing or invalid body" });
@@ -132,12 +132,12 @@ router.post("/api/zzz/sessions", requireLogin, async (req, res): Promise<void> =
 
   try {
     const { rows } = await pool.query(
-      `INSERT INTO zzz_draft_sessions
-         (session_key, owner_user_id, mode, team1, team2, state, blue_token, red_token)
-       VALUES ($1::text, $2::text, $3::text, $4::text, $5::text, $6::jsonb, $7::text, $8::text)
-       RETURNING mode, team1, team2, state, is_complete, last_activity_at, completed_at`,
-      [key, viewer.id, mode, team1, team2, JSON.stringify(state), blueToken, redToken]
-    );
+    `INSERT INTO zzz_draft_sessions
+      (session_key, owner_user_id, mode, team1, team2, state, featured, blue_token, red_token)
+    VALUES ($1::text, $2::text, $3::text, $4::text, $5::text, $6::jsonb, $7::jsonb, $8::text, $9::text)
+    RETURNING mode, team1, team2, state, featured, is_complete, last_activity_at, completed_at`,
+    [key, viewer.id, mode, team1, team2, JSON.stringify(state), JSON.stringify(featured ?? []), blueToken, redToken]
+  );
 
     push(key, "update", rows[0]);
 
@@ -153,7 +153,7 @@ router.post("/api/zzz/sessions", requireLogin, async (req, res): Promise<void> =
 router.put("/api/zzz/sessions/:key", requireLogin, async (req, res): Promise<void> => {
   const viewer = (req as any).user as { id: string };
   const { key } = req.params as { key: string };
-  const { state, isComplete } = req.body || {};
+  const { state, isComplete, featured } = req.body || {};
 
   // Ownership check
   const owner = await pool.query(
@@ -176,19 +176,21 @@ router.put("/api/zzz/sessions/:key", requireLogin, async (req, res): Promise<voi
 
   try {
     const { rows } = await pool.query(
-      `UPDATE zzz_draft_sessions
-          SET state = COALESCE($2::jsonb, state),
-              is_complete = COALESCE($3::boolean, is_complete),
-              completed_at = CASE
-                               WHEN $3::boolean IS TRUE AND completed_at IS NULL
-                                 THEN now()
-                               ELSE completed_at
-                             END,
-              last_activity_at = now()
-        WHERE session_key = $1::text
-        RETURNING mode, team1, team2, state, is_complete, last_activity_at, completed_at`,
-      [key, stateJson, isCompleteParam]
-    );
+    `UPDATE zzz_draft_sessions
+        SET state = COALESCE($2::jsonb, state),
+            featured = COALESCE($3::jsonb, featured),
+            is_complete = COALESCE($4::boolean, is_complete),
+            completed_at = CASE
+                            WHEN $4::boolean IS TRUE AND completed_at IS NULL
+                              THEN now()
+                            ELSE completed_at
+                          END,
+            last_activity_at = now()
+      WHERE session_key = $1::text
+      RETURNING mode, team1, team2, state, featured, is_complete, last_activity_at, completed_at`,
+    [key, stateJson, featured ? JSON.stringify(featured) : null, isCompleteParam]
+  );
+
 
     if (rows.length) push(key, "update", rows[0]);
     res.json({ ok: true, stateUpdated: shouldUpdateState });
@@ -204,7 +206,7 @@ router.get("/api/zzz/sessions/open", requireLogin, async (req, res): Promise<voi
 
   try {
     const { rows } = await pool.query(
-      `SELECT session_key, mode, team1, team2, state, is_complete, last_activity_at, completed_at,
+      `SELECT session_key, mode, team1, team2, state, featured, is_complete, last_activity_at, completed_at,
               blue_token, red_token
          FROM zzz_draft_sessions
         WHERE owner_user_id = $1::text
@@ -226,6 +228,7 @@ router.get("/api/zzz/sessions/open", requireLogin, async (req, res): Promise<voi
       team1: r.team1,
       team2: r.team2,
       state: r.state,
+      featured: r.featured,
       is_complete: r.is_complete,
       last_activity_at: r.last_activity_at,
       completed_at: r.completed_at,
@@ -238,12 +241,13 @@ router.get("/api/zzz/sessions/open", requireLogin, async (req, res): Promise<voi
   }
 });
 
+
 /* ───────────────── READ one session (public) ───────────────── */
 router.get("/api/zzz/sessions/:key", async (req, res): Promise<void> => {
   const { key } = req.params as { key: string };
   try {
     const { rows } = await pool.query(
-      `SELECT mode, team1, team2, state, is_complete, last_activity_at, completed_at
+      `SELECT mode, team1, team2, state, featured, is_complete, last_activity_at, completed_at
          FROM zzz_draft_sessions
         WHERE session_key = $1::text`,
       [key]
@@ -357,7 +361,7 @@ router.get("/api/zzz/sessions/:key/stream", async (req, res): Promise<void> => {
 
   // Initial snapshot or not_found
   const { rows } = await pool.query(
-    `SELECT mode, team1, team2, state, is_complete, last_activity_at, completed_at
+    `SELECT mode, team1, team2, state, featured, is_complete, last_activity_at, completed_at
        FROM zzz_draft_sessions
       WHERE session_key = $1::text`,
     [key]
@@ -425,7 +429,7 @@ router.post("/api/zzz/sessions/:key/actions", async (req, res): Promise<void> =>
 
   try {
     const q = await pool.query(
-      `SELECT mode, team1, team2, state, is_complete, blue_token, red_token
+      `SELECT mode, team1, team2, state, featured, is_complete, blue_token, red_token
          FROM zzz_draft_sessions
         WHERE session_key = $1::text`,
       [key]
@@ -435,14 +439,16 @@ router.post("/api/zzz/sessions/:key/actions", async (req, res): Promise<void> =>
     const row = q.rows[0];
     if (row.is_complete === true) return void res.status(409).json({ error: "Draft already completed" });
 
-    // Determine player's side from token
     const playerSide: "B" | "R" | null =
       row.blue_token === pt ? "B" : row.red_token === pt ? "R" : null;
-
     if (!playerSide) return void res.status(403).json({ error: "Invalid player token" });
 
     const state = row.state as SpectatorState;
     if (!isValidState(state)) return void res.status(500).json({ error: "Corrupt state" });
+
+    const featured = Array.isArray(row.featured) ? row.featured as Array<{ code: string; rule: string }> : [];
+    const globalBanSet = new Set(featured.filter(f => f.rule === "globalBan").map(f => f.code));
+    const globalPickSet = new Set(featured.filter(f => f.rule === "globalPick").map(f => f.code));
 
     const opNeedsIndex = new Set([
       "pick",
@@ -471,7 +477,12 @@ router.post("/api/zzz/sessions/:key/actions", async (req, res): Promise<void> =>
         return void res.status(400).json({ error: "Missing characterCode" });
       }
 
-      // Unique per side
+      // Enforce featured: global bans cannot be picked
+      if (globalBanSet.has(characterCode)) {
+        return void res.status(409).json({ error: "Character is globally banned" });
+      }
+
+      // Unique per side (globalPick is still unique per side)
       const mySideCodes = state.picks
         .map<string | null>((p, i) =>
           state.draftSequence[i]?.startsWith(playerSide) ? (p ? p.characterCode : null) : null
@@ -492,6 +503,11 @@ router.post("/api/zzz/sessions/:key/actions", async (req, res): Promise<void> =>
       if (slotSide !== playerSide) return void res.status(403).json({ error: "Wrong side for this turn" });
       if (typeof characterCode !== "string" || !characterCode) {
         return void res.status(400).json({ error: "Missing characterCode" });
+      }
+
+      // Enforce featured: cannot ban characters marked as globalPick
+      if (globalPickSet.has(characterCode)) {
+        return void res.status(409).json({ error: "Cannot ban: character is globally allowed (globalPick)" });
       }
 
       state.picks[index as number] = { characterCode, eidolon: 0, wengineId: null, superimpose: 1 };
@@ -555,7 +571,7 @@ router.post("/api/zzz/sessions/:key/actions", async (req, res): Promise<void> =>
           SET state = $2::jsonb,
               last_activity_at = now()
         WHERE session_key = $1::text
-        RETURNING mode, team1, team2, state, is_complete, last_activity_at, completed_at`,
+        RETURNING mode, team1, team2, state, featured, is_complete, last_activity_at, completed_at`,
       [key, JSON.stringify(state)]
     );
 
@@ -566,6 +582,7 @@ router.post("/api/zzz/sessions/:key/actions", async (req, res): Promise<void> =>
     res.status(500).json({ error: "Failed to apply action" });
   }
 });
+
 
 /* ───────────────── DELETE unfinished session (owner only) ───────────────── */
 router.delete("/api/zzz/sessions/:key", requireLogin, async (req, res): Promise<void> => {
