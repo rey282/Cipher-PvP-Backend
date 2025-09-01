@@ -17,6 +17,59 @@ const requireLogin: RequestHandler = (req, res, next) => {
 
 // Shared draft JSON shapes (match what the frontend sends/stores)
 type ZzzMode = "2v2" | "3v3";
+// --- Types & helper: sanitize featured + type guards ---
+type FeaturedCharacter = {
+  kind: "character";
+  code: string;
+  rule: "none" | "globalBan" | "globalPick";
+  customCost?: number | null;
+};
+
+type FeaturedWengine = {
+  kind: "wengine";
+  id: string;
+  // NOTE: server ignores globalPick for W-Engines; only allow none/globalBan
+  rule: "none" | "globalBan";
+  customCost?: number | null;
+};
+
+type FeaturedItem = FeaturedCharacter | FeaturedWengine;
+
+function isChar(f: FeaturedItem): f is FeaturedCharacter {
+  return f.kind === "character";
+}
+function isWE(f: FeaturedItem): f is FeaturedWengine {
+  return f.kind === "wengine";
+}
+
+function sanitizeFeatured(raw: any): FeaturedItem[] {
+  if (!Array.isArray(raw)) return [];
+  return raw
+    .map((f) => {
+      if (f?.kind === "character" && typeof f.code === "string") {
+        const rule: FeaturedCharacter["rule"] =
+          f.rule === "globalBan" || f.rule === "globalPick" ? f.rule : "none";
+        return {
+          kind: "character",
+          code: f.code,
+          rule,
+          customCost: typeof f.customCost === "number" ? f.customCost : null,
+        } as FeaturedCharacter;
+      }
+      if (f?.kind === "wengine" && (typeof f.id === "string" || typeof f.id === "number")) {
+        // Force W-Engine to only none/globalBan
+        const rule: FeaturedWengine["rule"] = f.rule === "globalBan" ? "globalBan" : "none";
+        return {
+          kind: "wengine",
+          id: String(f.id),
+          rule,
+          customCost: typeof f.customCost === "number" ? f.customCost : null,
+        } as FeaturedWengine;
+      }
+      return null;
+    })
+    .filter(Boolean) as FeaturedItem[];
+}
 
 interface ServerPick {
   characterCode: string;
@@ -131,13 +184,15 @@ router.post("/api/zzz/sessions", requireLogin, async (req, res): Promise<void> =
   const redToken = genKey(20);
 
   try {
+    const featuredSan = sanitizeFeatured(featured ?? []);
     const { rows } = await pool.query(
-    `INSERT INTO zzz_draft_sessions
-      (session_key, owner_user_id, mode, team1, team2, state, featured, blue_token, red_token)
-    VALUES ($1::text, $2::text, $3::text, $4::text, $5::text, $6::jsonb, $7::jsonb, $8::text, $9::text)
-    RETURNING mode, team1, team2, state, featured, is_complete, last_activity_at, completed_at`,
-    [key, viewer.id, mode, team1, team2, JSON.stringify(state), JSON.stringify(featured ?? []), blueToken, redToken]
-  );
+      `INSERT INTO zzz_draft_sessions
+        (session_key, owner_user_id, mode, team1, team2, state, featured, blue_token, red_token)
+      VALUES ($1::text, $2::text, $3::text, $4::text, $5::text, $6::jsonb, $7::jsonb, $8::text, $9::text)
+      RETURNING mode, team1, team2, state, featured, is_complete, last_activity_at, completed_at`,
+      [key, viewer.id, mode, team1, team2, JSON.stringify(state), JSON.stringify(featuredSan), blueToken, redToken]
+    );
+
 
     push(key, "update", rows[0]);
 
@@ -175,21 +230,20 @@ router.put("/api/zzz/sessions/:key", requireLogin, async (req, res): Promise<voi
   const isCompleteParam = typeof isComplete === "boolean" ? isComplete : null;
 
   try {
+    const featuredSan = Array.isArray(featured) ? sanitizeFeatured(featured) : null;
+
     const { rows } = await pool.query(
-    `UPDATE zzz_draft_sessions
-        SET state = COALESCE($2::jsonb, state),
-            featured = COALESCE($3::jsonb, featured),
-            is_complete = COALESCE($4::boolean, is_complete),
-            completed_at = CASE
-                            WHEN $4::boolean IS TRUE AND completed_at IS NULL
-                              THEN now()
-                            ELSE completed_at
-                          END,
-            last_activity_at = now()
-      WHERE session_key = $1::text
-      RETURNING mode, team1, team2, state, featured, is_complete, last_activity_at, completed_at`,
-    [key, stateJson, featured ? JSON.stringify(featured) : null, isCompleteParam]
-  );
+      `UPDATE zzz_draft_sessions
+          SET state = COALESCE($2::jsonb, state),
+              featured = COALESCE($3::jsonb, featured),
+              is_complete = COALESCE($4::boolean, is_complete),
+              completed_at = CASE WHEN $4::boolean IS TRUE AND completed_at IS NULL THEN now() ELSE completed_at END,
+              last_activity_at = now()
+        WHERE session_key = $1::text
+        RETURNING mode, team1, team2, state, featured, is_complete, last_activity_at, completed_at`,
+      [key, stateJson, featuredSan ? JSON.stringify(featuredSan) : null, isCompleteParam]
+    );
+
 
 
     if (rows.length) push(key, "update", rows[0]);
@@ -446,21 +500,29 @@ router.post("/api/zzz/sessions/:key/actions", async (req, res): Promise<void> =>
     const state = row.state as SpectatorState;
     if (!isValidState(state)) return void res.status(500).json({ error: "Corrupt state" });
 
-    const featured = Array.isArray(row.featured) ? row.featured as Array<{ code: string; rule: string }> : [];
-    const globalBanSet = new Set(featured.filter(f => f.rule === "globalBan").map(f => f.code));
-    const globalPickSet = new Set(featured.filter(f => f.rule === "globalPick").map(f => f.code));
+    // ---- Featured (sanitized & narrowed) ----
+    const featuredList = sanitizeFeatured(row.featured);
+    const characterGlobalBan = new Set(
+      featuredList.filter(isChar).filter(f => f.rule === "globalBan").map(f => f.code)
+    );
+    const characterGlobalPick = new Set(
+      featuredList.filter(isChar).filter(f => f.rule === "globalPick").map(f => f.code)
+    );
+    // W-Engines: only 'globalBan' is honored server-side
+    const wengineGlobalBan = new Set(
+      featuredList.filter(isWE).filter(f => f.rule === "globalBan").map(f => String(f.id))
+    );
 
     const opNeedsIndex = new Set([
-      "pick",
-      "ban",
-      "setMindscape",
-      "setSuperimpose",
-      "setWengine",
+      "pick", "ban", "setMindscape", "setSuperimpose", "setWengine",
     ]).has(op);
 
     if (opNeedsIndex) {
       if (!Number.isInteger(index) || (index as number) < 0) {
         return void res.status(400).json({ error: "Invalid index" });
+      }
+      if ((index as number) >= state.draftSequence.length) {
+        return void res.status(400).json({ error: "Index out of range" });
       }
     }
 
@@ -477,12 +539,12 @@ router.post("/api/zzz/sessions/:key/actions", async (req, res): Promise<void> =>
         return void res.status(400).json({ error: "Missing characterCode" });
       }
 
-      // Enforce featured: global bans cannot be picked
-      if (globalBanSet.has(characterCode)) {
+      // Character: global ban
+      if (characterGlobalBan.has(characterCode)) {
         return void res.status(409).json({ error: "Character is globally banned" });
       }
 
-      // Unique per side (globalPick is still unique per side)
+      // Unique per side (even if globalPick)
       const mySideCodes = state.picks
         .map<string | null>((p, i) =>
           state.draftSequence[i]?.startsWith(playerSide) ? (p ? p.characterCode : null) : null
@@ -505,8 +567,8 @@ router.post("/api/zzz/sessions/:key/actions", async (req, res): Promise<void> =>
         return void res.status(400).json({ error: "Missing characterCode" });
       }
 
-      // Enforce featured: cannot ban characters marked as globalPick
-      if (globalPickSet.has(characterCode)) {
+      // Cannot ban global-pick characters
+      if (characterGlobalPick.has(characterCode)) {
         return void res.status(409).json({ error: "Cannot ban: character is globally allowed (globalPick)" });
       }
 
@@ -532,7 +594,15 @@ router.post("/api/zzz/sessions/:key/actions", async (req, res): Promise<void> =>
       if (slotSide !== playerSide || isBan) return void res.status(403).json({ error: "Cannot edit opponent or ban slot" });
       const slot = state.picks[index as number];
       if (!slot) return void res.status(409).json({ error: "No character in slot" });
-      slot.wengineId = wengineId == null || wengineId === "" ? null : String(wengineId);
+
+      // 🔒 Enforce universal ban for W-Engines
+      if (wengineId != null && String(wengineId) !== "") {
+        if (wengineGlobalBan.has(String(wengineId))) {
+          return void res.status(409).json({ error: "W-Engine is globally banned" });
+        }
+      }
+
+      slot.wengineId = wengineId == null || String(wengineId) === "" ? null : String(wengineId);
 
     } else if (op === "setLock") {
       const { locked } = req.body || {};
@@ -582,6 +652,7 @@ router.post("/api/zzz/sessions/:key/actions", async (req, res): Promise<void> =>
     res.status(500).json({ error: "Failed to apply action" });
   }
 });
+
 
 
 /* ───────────────── DELETE unfinished session (owner only) ───────────────── */
