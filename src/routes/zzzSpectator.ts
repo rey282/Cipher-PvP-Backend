@@ -513,12 +513,14 @@ router.get(
       );
 
       if (rows.length === 0) {
-        res.status(404).json({ error: "No open session" });
+        // ✅ Instead of 404, return 200 with exists: false
+        res.json({ exists: false });
         return;
       }
 
       const r = rows[0];
       res.json({
+        exists: true,
         key: r.session_key,
         mode: r.mode,
         team1: r.team1,
@@ -540,6 +542,7 @@ router.get(
     }
   }
 );
+
 
 /* ───────────────── READ one session (public) ───────────────── */
 router.get("/api/zzz/sessions/:key", async (req, res) => {
