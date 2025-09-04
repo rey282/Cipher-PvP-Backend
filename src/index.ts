@@ -24,6 +24,7 @@ import insightsRouter from "./routes/insights";
 import zzzRouter from "./routes/zzz";
 import cipherCostRouter from "./routes/ciphercost";
 import zzzSpectatorRoutes from "./routes/zzzSpectator";
+import hsrSpectatorRoutes from "./routes/hsrSpectator";
 
 dotenv.config();
 
@@ -122,6 +123,7 @@ app.use(insightsRouter);
 app.use("/api/zzz", zzzRouter);
 app.use(cipherCostRouter);
 app.use(zzzSpectatorRoutes);
+app.use(hsrSpectatorRoutes);
 
 // ───── Root + Cache ─────
 app.get("/", (_req: Request, res: Response) => {
