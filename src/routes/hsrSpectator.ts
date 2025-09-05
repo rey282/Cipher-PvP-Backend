@@ -18,10 +18,80 @@ const requireLogin: RequestHandler = (req, res, next) => {
 /* ───────────────── Mode/type defs ───────────────── */
 type HsrMode = "2ban" | "3ban";
 
+/* ───────────────── Timer helpers (authoritative on server) ───────────────── */
+const MOVE_GRACE = 30;
+
+const isBanTok = (t: string) => t === "BB" || t === "RR";
+const sideOfTok = (t: string) => (t?.startsWith("B") ? "B" : t?.startsWith("R") ? "R" : null);
+
+function isFirstBanForSide(idx: number, seq: string[]) {
+  const tok = seq[idx] || "";
+  if (!isBanTok(tok)) return false;
+  for (let i = 0; i < idx; i++) if (seq[i] === tok) return false;
+  return true;
+}
+
+/** Ensure timer fields exist */
+function initTimerFields(s: any) {
+  if (!s) return s;
+  if (typeof s.timerEnabled !== "boolean") s.timerEnabled = false;
+  if (!Number.isFinite(Number(s.reserveSeconds))) s.reserveSeconds = 0;
+  if (!s.paused) s.paused = { B: false, R: false };
+  const seed = Math.max(0, Number(s.reserveSeconds) || 0);
+  if (!s.reserveLeft || typeof s.reserveLeft.B !== "number" || typeof s.reserveLeft.R !== "number") {
+    s.reserveLeft = { B: seed, R: seed };
+  }
+  if (!Number.isFinite(Number(s.graceLeft))) s.graceLeft = MOVE_GRACE;
+  if (!Number.isFinite(Number(s.timerUpdatedAt))) s.timerUpdatedAt = Date.now();
+  return s;
+}
+
+/** Burn once from timerUpdatedAt → now, mutating a shallow copy (used for persist & live ticks) */
+function burnToNow(raw: any, nowMs: number) {
+  const s = { ...raw };
+  initTimerFields(s);
+  if (!s.timerEnabled) { s.timerUpdatedAt = nowMs; return s; }
+
+  const tok = s.draftSequence?.[s.currentTurn] || "";
+  const side = sideOfTok(tok);
+  const frozen = isFirstBanForSide(s.currentTurn, s.draftSequence || []);
+  const last = Number(s.timerUpdatedAt) || nowMs;
+
+  if (!side || s.paused?.[side] || frozen) { s.timerUpdatedAt = nowMs; return s; }
+
+  let dt = Math.max(0, (nowMs - last) / 1000);
+  let grace = Math.max(0, Number(s.graceLeft ?? MOVE_GRACE));
+  let resB = Math.max(0, Number(s.reserveLeft?.B ?? s.reserveSeconds ?? 0));
+  let resR = Math.max(0, Number(s.reserveLeft?.R ?? s.reserveSeconds ?? 0));
+
+  const g = Math.min(grace, dt);
+  grace -= g; dt -= g;
+
+  if (dt > 0) {
+    if (side === "B") resB = Math.max(0, resB - dt);
+    else if (side === "R") resR = Math.max(0, resR - dt);
+  }
+
+  s.graceLeft = Number(grace.toFixed(3));
+  s.reserveLeft = { B: Number(resB.toFixed(3)), R: Number(resR.toFixed(3)) };
+  s.timerUpdatedAt = nowMs;
+  return s;
+}
+
+/** Reset grace on turn change (call immediately after incrementing currentTurn) */
+function resetGraceForNewTurn(raw: any, nowMs: number) {
+  const s = { ...raw };
+  initTimerFields(s);
+  s.graceLeft = MOVE_GRACE;
+  s.timerUpdatedAt = nowMs;
+  return s;
+}
+
 /* ───────────────── Shared shape helpers ───────────────── */
 function shapeSessionRow(row: any) {
   const costLimit = row.cost_limit == null ? null : Number(row.cost_limit);
-  const penaltyPerPoint = row.penalty_per_point == null ? 2500 : Number(row.penalty_per_point);
+  const penaltyPerPoint =
+    row.penalty_per_point == null ? 2500 : Number(row.penalty_per_point);
 
   const payload: any = {
     mode: row.mode,
@@ -48,7 +118,8 @@ function shapeSessionRow(row: any) {
   // ⬇️ expose timer settings at top-level (while still keeping them in state)
   try {
     const st = row.state || {};
-    if (typeof st.timerEnabled === "boolean") payload.timerEnabled = !!st.timerEnabled;
+    if (typeof st.timerEnabled === "boolean")
+      payload.timerEnabled = !!st.timerEnabled;
     if (Number.isFinite(Number(st.reserveSeconds))) {
       payload.reserveSeconds = Math.max(0, Number(st.reserveSeconds));
     }
@@ -91,8 +162,6 @@ function normalizeIncomingState(s: any): any {
     picks,
   };
 }
-
-
 
 /* ───────────────── Featured types ─────────────────
    Same as ZZZ, but "wengine" -> "lightcone".
@@ -182,7 +251,6 @@ function normalizeStateForHsr(out: any) {
   return out;
 }
 
-
 /* ───────────────── Cost Preset types ───────────────── */
 type CostProfileRow = {
   id: string;
@@ -245,16 +313,36 @@ interface SpectatorState {
   draftSequence: string[]; // tokens incl. 'BB'/'RR' for bans; client decides full sequence
   currentTurn: number;
   picks: (ServerPick | null)[];
-  blueScores: number[]; // parity with ZZZ (HSR can ignore)
-  redScores: number[]; // parity with ZZZ (HSR can ignore)
+  blueScores: number[];
+  redScores: number[];
   blueLocked?: boolean;
   redLocked?: boolean;
   paused?: { B: boolean; R: boolean };
+
+  // Authoritative timer fields (optional)
+  timerEnabled?: boolean;
+  reserveSeconds?: number;
+  reserveLeft?: { B: number; R: number };
+  graceLeft?: number;
+  timerUpdatedAt?: number;
 }
 
 /* ───────────────── SSE hub ───────────────── */
 type Client = import("express").Response;
 const clients = new Map<string, Set<Client>>();
+
+// runtime cache for shaped sessions + per-session tickers
+const sessionCache = new Map<string, any>();
+const tickers = new Map<string, NodeJS.Timeout>();
+
+function stopTickerIfNoClients(key: string) {
+  const set = clients.get(key);
+  if (set && set.size > 0) return;
+  const h = tickers.get(key);
+  if (h) clearInterval(h);
+  tickers.delete(key);
+  sessionCache.delete(key);
+}
 
 function addClient(key: string, res: Client) {
   let set = clients.get(key);
@@ -262,15 +350,51 @@ function addClient(key: string, res: Client) {
   set.add(res);
   res.on("close", () => {
     set!.delete(res);
-    if (set!.size === 0) clients.delete(key);
+    if (set!.size === 0) {
+      clients.delete(key);
+      stopTickerIfNoClients(key);
+    }
   });
 }
 
 function push(key: string, event: string, payload: any) {
   const set = clients.get(key);
   if (!set) return;
+  if (event === "update" || event === "snapshot") {
+    sessionCache.set(key, payload);
+  }
   const line = `event: ${event}\ndata: ${JSON.stringify(payload)}\n\n`;
   for (const res of set) res.write(line);
+}
+
+function startTicker(key: string) {
+  if (tickers.has(key)) return;
+  const h = setInterval(() => {
+    const payload = sessionCache.get(key);
+    if (!payload) return;
+    const base = payload.state || {};
+    const now = Date.now();
+
+    // compute *view* only; don't touch DB here
+    const burned = burnToNow(base, now);
+
+    // store in cache so next tick burns from this moment
+    const nextPayload = { ...payload, state: burned };
+    sessionCache.set(key, nextPayload);
+
+    // stream minimal timer state
+    push(key, "timer", {
+      state: {
+        timerEnabled: !!burned.timerEnabled,
+        paused: burned.paused,
+        reserveLeft: burned.reserveLeft,
+        graceLeft: burned.graceLeft,
+        timerUpdatedAt: burned.timerUpdatedAt,
+        currentTurn: burned.currentTurn,
+      },
+    });
+  }, 250);
+  tickers.set(key, h);
 }
 
 async function snapshotAndPush(key: string) {
@@ -285,15 +409,20 @@ async function snapshotAndPush(key: string) {
     WHERE s.session_key = $1::text`,
     [key]
   );
-  if (rows.length) push(key, "update", shapeSessionRow(rows[0]));
+  if (rows.length) {
+    const shaped = shapeSessionRow(rows[0]);
+    push(key, "update", shaped);
+  }
 }
 
 /* ───────────────── Helpers ───────────────── */
 function isValidState(s: any): boolean {
   if (!s || typeof s !== "object" || Array.isArray(s)) return false;
-  if (!Array.isArray(s.draftSequence) || s.draftSequence.length === 0) return false;
+  if (!Array.isArray(s.draftSequence) || s.draftSequence.length === 0)
+    return false;
   if (!Number.isInteger(s.currentTurn) || s.currentTurn < 0) return false;
-  if (!Array.isArray(s.picks) || s.picks.length !== s.draftSequence.length) return false;
+  if (!Array.isArray(s.picks) || s.picks.length !== s.draftSequence.length)
+    return false;
   if (!Array.isArray(s.blueScores) || !Array.isArray(s.redScores)) return false;
 
   const okPicks = s.picks.every(
@@ -309,174 +438,211 @@ function isValidState(s: any): boolean {
 }
 
 const isBanToken = (tok: string) => tok === "BB" || tok === "RR";
-const sideOfToken = (tok: string) =>
+const sideOfTokenStrict = (tok: string) =>
   tok?.startsWith("B") ? "B" : tok?.startsWith("R") ? "R" : "";
 const sideLocked = (s: SpectatorState, side: "B" | "R") =>
   side === "B" ? !!s.blueLocked : !!s.redLocked;
 
 /* ───────────────── CREATE session ───────────────── */
-router.post("/api/hsr/sessions", requireLogin, async (req, res): Promise<void> => {
-  const viewer = (req as any).user as { id: string };
-  const {
-    team1,
-    team2,
-    mode,
-    state,
-    featured,
-    costProfileId,
-    costLimit: costLimitRaw,
-    penaltyPerPoint: penaltyRaw,
-  } = req.body || {};
+router.post(
+  "/api/hsr/sessions",
+  requireLogin,
+  async (req, res): Promise<void> => {
+    const viewer = (req as any).user as { id: string };
+    const {
+      team1,
+      team2,
+      mode,
+      state,
+      featured,
+      costProfileId,
+      costLimit: costLimitRaw,
+      penaltyPerPoint: penaltyRaw,
+    } = req.body || {};
 
-  if (!team1 || !team2 || (mode !== "2ban" && mode !== "3ban") || !state || !isValidState(state)) {
-    res.status(400).json({ error: "Missing or invalid body" });
-    return;
-  }
+    if (
+      !team1 ||
+      !team2 ||
+      (mode !== "2ban" && mode !== "3ban") ||
+      !state ||
+      !isValidState(state)
+    ) {
+      res.status(400).json({ error: "Missing or invalid body" });
+      return;
+    }
 
-  // merge timer/paused into state we persist
-  const normalizedState = normalizeIncomingState(state);
-  const fromBodyTimerEnabled =
-    typeof req.body?.timerEnabled === "boolean" ? !!req.body.timerEnabled : undefined;
-  const fromBodyReserveSeconds =
-    Number.isFinite(Number(req.body?.reserveSeconds)) ? Math.max(0, Number(req.body.reserveSeconds)) : undefined;
-  const fromBodyPaused = req.body?.paused;
+    // merge timer/paused into state we persist
+    const normalizedState = normalizeIncomingState(state);
+    const fromBodyTimerEnabled =
+      typeof req.body?.timerEnabled === "boolean"
+        ? !!req.body.timerEnabled
+        : undefined;
+    const fromBodyReserveSeconds = Number.isFinite(
+      Number(req.body?.reserveSeconds)
+    )
+      ? Math.max(0, Number(req.body.reserveSeconds))
+      : undefined;
+    const fromBodyPaused = req.body?.paused;
 
-  const mergedState: any = { ...normalizedState };
-  if (fromBodyTimerEnabled !== undefined) mergedState.timerEnabled = fromBodyTimerEnabled;
-  if (fromBodyReserveSeconds !== undefined) mergedState.reserveSeconds = fromBodyReserveSeconds;
-  if (fromBodyPaused && typeof fromBodyPaused.B === "boolean" && typeof fromBodyPaused.R === "boolean") {
-    mergedState.paused = { B: !!fromBodyPaused.B, R: !!fromBodyPaused.R };
-  }
+    const mergedState: any = { ...normalizedState };
+    if (fromBodyTimerEnabled !== undefined)
+      mergedState.timerEnabled = fromBodyTimerEnabled;
+    if (fromBodyReserveSeconds !== undefined)
+      mergedState.reserveSeconds = fromBodyReserveSeconds;
+    if (
+      fromBodyPaused &&
+      typeof fromBodyPaused.B === "boolean" &&
+      typeof fromBodyPaused.R === "boolean"
+    ) {
+      mergedState.paused = { B: !!fromBodyPaused.B, R: !!fromBodyPaused.R };
+    }
+    // seed authoritative timer fields
+    initTimerFields(mergedState);
 
-
-  // Reuse unfinished session per owner
-  const existing = await pool.query(
-    `SELECT session_key, mode, team1, team2, state, is_complete, last_activity_at, completed_at,
-            blue_token, red_token, cost_profile_id, cost_limit, penalty_per_point
-       FROM hsr_draft_sessions
-      WHERE owner_user_id = $1::text
-        AND is_complete IS NOT TRUE
-      ORDER BY last_activity_at DESC
-      LIMIT 1`,
-    [viewer.id]
-  );
-
-  if (existing.rows.length) {
-    const ex = existing.rows[0];
-    const url = `${process.env.PUBLIC_BASE_URL || "https://cipher.uno"}/hsr/s/${ex.session_key}`;
-    res.json({
-      key: ex.session_key,
-      url,
-      reused: true,
-      blueToken: ex.blue_token || null,
-      redToken: ex.red_token || null,
-      costProfileId: ex.cost_profile_id || null,
-      costLimit: Number(ex.cost_limit),
-      penaltyPerPoint: ex.penalty_per_point,
-    });
-    return;
-  }
-
-  const key = genKey(22);
-  const blueToken = genKey(20);
-  const redToken = genKey(20);
-
-  // Defaults analogous to ZZZ
-  const parsedCL = Number(costLimitRaw);
-  const finalCostLimit =
-    Number.isFinite(parsedCL) && parsedCL > 0 ? parsedCL : mode === "3ban" ? 9 : 6;
-
-  const parsedPenalty = Number(penaltyRaw);
-  const finalPenaltyPerPoint =
-    Number.isFinite(parsedPenalty) && parsedPenalty > 0 ? Math.floor(parsedPenalty) : 2500;
-
-  // Validate preset ownership (optional)
-  let presetId: string | null = null;
-  if (typeof costProfileId === "string" && costProfileId) {
-    const q = await pool.query(
-      `SELECT id FROM hsr_cost_presets WHERE id = $1::uuid AND owner_user_id = $2::text`,
-      [costProfileId, viewer.id]
+    // Reuse unfinished session per owner
+    const existing = await pool.query(
+      `SELECT session_key, mode, team1, team2, state, is_complete, last_activity_at, completed_at,
+              blue_token, red_token, cost_profile_id, cost_limit, penalty_per_point
+         FROM hsr_draft_sessions
+        WHERE owner_user_id = $1::text
+          AND is_complete IS NOT TRUE
+        ORDER BY last_activity_at DESC
+        LIMIT 1`,
+      [viewer.id]
     );
-    presetId = q.rows.length ? q.rows[0].id : null;
-  }
 
-  try {
-    const featuredSan = sanitizeFeatured(featured ?? []);
-    await pool.query(
-      `INSERT INTO hsr_draft_sessions
-        (session_key, owner_user_id, mode, team1, team2, state, featured,
-         blue_token, red_token, cost_profile_id, cost_limit, penalty_per_point)
-      VALUES ($1::text, $2::text, $3::text, $4::text, $5::text, $6::jsonb, $7::jsonb,
-              $8::text, $9::text, $10::uuid, $11::numeric, $12::int)`,
-      [
+    if (existing.rows.length) {
+      const ex = existing.rows[0];
+      const url = `${
+        process.env.PUBLIC_BASE_URL || "https://cipher.uno"
+      }/hsr/s/${ex.session_key}`;
+      res.json({
+        key: ex.session_key,
+        url,
+        reused: true,
+        blueToken: ex.blue_token || null,
+        redToken: ex.red_token || null,
+        costProfileId: ex.cost_profile_id || null,
+        costLimit: Number(ex.cost_limit),
+        penaltyPerPoint: ex.penalty_per_point,
+      });
+      return;
+    }
+
+    const key = genKey(22);
+    const blueToken = genKey(20);
+    const redToken = genKey(20);
+
+    // Defaults analogous to ZZZ
+    const parsedCL = Number(costLimitRaw);
+    const finalCostLimit =
+      Number.isFinite(parsedCL) && parsedCL > 0
+        ? parsedCL
+        : mode === "3ban"
+        ? 9
+        : 6;
+
+    const parsedPenalty = Number(penaltyRaw);
+    const finalPenaltyPerPoint =
+      Number.isFinite(parsedPenalty) && parsedPenalty > 0
+        ? Math.floor(parsedPenalty)
+        : 2500;
+
+    // Validate preset ownership (optional)
+    let presetId: string | null = null;
+    if (typeof costProfileId === "string" && costProfileId) {
+      const q = await pool.query(
+        `SELECT id FROM hsr_cost_presets WHERE id = $1::uuid AND owner_user_id = $2::text`,
+        [costProfileId, viewer.id]
+      );
+      presetId = q.rows.length ? q.rows[0].id : null;
+    }
+
+    try {
+      const featuredSan = sanitizeFeatured(featured ?? []);
+      await pool.query(
+        `INSERT INTO hsr_draft_sessions
+          (session_key, owner_user_id, mode, team1, team2, state, featured,
+           blue_token, red_token, cost_profile_id, cost_limit, penalty_per_point)
+        VALUES ($1::text, $2::text, $3::text, $4::text, $5::text, $6::jsonb, $7::jsonb,
+                $8::text, $9::text, $10::uuid, $11::numeric, $12::int)`,
+        [
+          key,
+          viewer.id,
+          mode,
+          team1,
+          team2,
+          JSON.stringify(mergedState),
+          JSON.stringify(featuredSan),
+          blueToken,
+          redToken,
+          presetId,
+          finalCostLimit,
+          finalPenaltyPerPoint,
+        ]
+      );
+
+      await snapshotAndPush(key);
+
+      const url = `${
+        process.env.PUBLIC_BASE_URL || "https://cipher.uno"
+      }/hsr/s/${key}`;
+      res.json({
         key,
-        viewer.id,
-        mode,
-        team1,
-        team2,
-        JSON.stringify(mergedState),
-        JSON.stringify(featuredSan),
+        url,
         blueToken,
         redToken,
-        presetId,
-        finalCostLimit,
-        finalPenaltyPerPoint,
-      ]
-    );
-
-    await snapshotAndPush(key);
-
-    const url = `${process.env.PUBLIC_BASE_URL || "https://cipher.uno"}/hsr/s/${key}`;
-    res.json({
-      key,
-      url,
-      blueToken,
-      redToken,
-      costProfileId: presetId,
-      costLimit: finalCostLimit,
-      penaltyPerPoint: finalPenaltyPerPoint,
-    });
-  } catch (e) {
-    console.error(e);
-    res.status(500).json({ error: "Failed to create session" });
+        costProfileId: presetId,
+        costLimit: finalCostLimit,
+        penaltyPerPoint: finalPenaltyPerPoint,
+      });
+    } catch (e) {
+      console.error(e);
+      res.status(500).json({ error: "Failed to create session" });
+    }
   }
-});
+);
 
 /* ───────────────── UPDATE session ───────────────── */
-router.put("/api/hsr/sessions/:key", requireLogin, async (req, res): Promise<void> => {
-  const viewer = (req as any).user as { id: string };
-  const { key } = req.params as { key: string };
-  const {
-    state,
-    isComplete,
-    featured,
-    costProfileId,
-    costLimit: costLimitRaw,
-    penaltyPerPoint: penaltyRaw,
-  } = req.body || {};
+router.put(
+  "/api/hsr/sessions/:key",
+  requireLogin,
+  async (req, res): Promise<void> => {
+    const viewer = (req as any).user as { id: string };
+    const { key } = req.params as { key: string };
+    const {
+      state,
+      isComplete,
+      featured,
+      costProfileId,
+      costLimit: costLimitRaw,
+      penaltyPerPoint: penaltyRaw,
+    } = req.body || {};
 
-  // Ownership check
-  const owner = await pool.query(
-    `SELECT owner_user_id FROM hsr_draft_sessions WHERE session_key = $1::text`,
-    [key]
-  );
-  if (owner.rows.length === 0) {
-    res.status(404).json({ error: "Session not found" });
-    return;
-  }
-  if (owner.rows[0].owner_user_id !== viewer.id) {
-    res.status(403).json({ error: "Forbidden" });
-    return;
-  }
+    // Ownership check
+    const owner = await pool.query(
+      `SELECT owner_user_id FROM hsr_draft_sessions WHERE session_key = $1::text`,
+      [key]
+    );
+    if (owner.rows.length === 0) {
+      res.status(404).json({ error: "Session not found" });
+      return;
+    }
+    if (owner.rows[0].owner_user_id !== viewer.id) {
+      res.status(403).json({ error: "Forbidden" });
+      return;
+    }
 
-
-    const hasStateKey = Object.prototype.hasOwnProperty.call(req.body ?? {}, "state");
+    const hasStateKey =
+      Object.prototype.hasOwnProperty.call(req.body ?? {}, "state");
     const shouldUpdateState = hasStateKey && isValidState(state);
     const normalizedState = shouldUpdateState ? normalizeIncomingState(state) : null;
     const fromBodyTimerEnabled =
       typeof req.body?.timerEnabled === "boolean" ? !!req.body.timerEnabled : undefined;
     const fromBodyReserveSeconds =
-      Number.isFinite(Number(req.body?.reserveSeconds)) ? Math.max(0, Number(req.body.reserveSeconds)) : undefined;
+      Number.isFinite(Number(req.body?.reserveSeconds))
+        ? Math.max(0, Number(req.body.reserveSeconds))
+        : undefined;
     const fromBodyPaused = req.body?.paused;
 
     let stateJson = null;
@@ -484,86 +650,97 @@ router.put("/api/hsr/sessions/:key", requireLogin, async (req, res): Promise<voi
       const merged: any = { ...normalizedState };
       if (fromBodyTimerEnabled !== undefined) merged.timerEnabled = fromBodyTimerEnabled;
       if (fromBodyReserveSeconds !== undefined) merged.reserveSeconds = fromBodyReserveSeconds;
-      if (fromBodyPaused && typeof fromBodyPaused.B === "boolean" && typeof fromBodyPaused.R === "boolean") {
+      if (
+        fromBodyPaused &&
+        typeof fromBodyPaused.B === "boolean" &&
+        typeof fromBodyPaused.R === "boolean"
+      ) {
         merged.paused = { B: !!fromBodyPaused.B, R: !!fromBodyPaused.R };
       }
+      // ensure timer fields exist
+      initTimerFields(merged);
       stateJson = JSON.stringify(merged);
     }
 
+    const isCompleteParam = typeof isComplete === "boolean" ? isComplete : null;
 
-  const isCompleteParam = typeof isComplete === "boolean" ? isComplete : null;
+    // costProfileId handling
+    let presetIdSql: string | null | undefined = undefined; // undefined => keep as-is
+    if (Object.prototype.hasOwnProperty.call(req.body ?? {}, "costProfileId")) {
+      if (costProfileId === null) {
+        presetIdSql = null; // explicit clear
+      } else if (typeof costProfileId === "string" && costProfileId) {
+        const chk = await pool.query(
+          `SELECT id FROM hsr_cost_presets WHERE id = $1::uuid AND owner_user_id = $2::text`,
+          [costProfileId, viewer.id]
+        );
+        presetIdSql = chk.rows.length ? chk.rows[0].id : null;
+      } else {
+        presetIdSql = null;
+      }
+    }
 
-  // costProfileId handling
-  let presetIdSql: string | null | undefined = undefined; // undefined => keep as-is
-  if (Object.prototype.hasOwnProperty.call(req.body ?? {}, "costProfileId")) {
-    if (costProfileId === null) {
-      presetIdSql = null; // explicit clear
-    } else if (typeof costProfileId === "string" && costProfileId) {
-      const chk = await pool.query(
-        `SELECT id FROM hsr_cost_presets WHERE id = $1::uuid AND owner_user_id = $2::text`,
-        [costProfileId, viewer.id]
+    // Optional cost updates
+    const hasCL =
+      Object.prototype.hasOwnProperty.call(req.body ?? {}, "costLimit");
+    const hasPenalty =
+      Object.prototype.hasOwnProperty.call(req.body ?? {}, "penaltyPerPoint");
+
+    const parsedCL = Number(costLimitRaw);
+    const clUpdate =
+      hasCL && Number.isFinite(parsedCL) && parsedCL > 0 ? parsedCL : null;
+
+    const parsedPenalty = Number(penaltyRaw);
+    const penaltyUpdate =
+      hasPenalty && Number.isFinite(parsedPenalty) && parsedPenalty > 0
+        ? Math.floor(parsedPenalty)
+        : null;
+
+    try {
+      const featuredSan = Array.isArray(featured)
+        ? sanitizeFeatured(featured)
+        : null;
+
+      const { rows } = await pool.query(
+        `UPDATE hsr_draft_sessions
+            SET state = COALESCE($2::jsonb, state),
+                featured = COALESCE($3::jsonb, featured),
+                is_complete = COALESCE($4::boolean, is_complete),
+                completed_at = CASE WHEN $4::boolean IS TRUE AND completed_at IS NULL THEN now() ELSE completed_at END,
+                cost_profile_id = COALESCE($5::uuid,
+                                   CASE WHEN $6::int = 1 THEN NULL ELSE cost_profile_id END),
+                cost_limit = COALESCE($7::numeric, cost_limit),
+                penalty_per_point = COALESCE($8::int, penalty_per_point),
+                last_activity_at = now()
+          WHERE session_key = $1::text
+          RETURNING mode, team1, team2, state, featured, is_complete, last_activity_at, completed_at,
+                    cost_profile_id, cost_limit, penalty_per_point`,
+        [
+          key,
+          stateJson,
+          featuredSan ? JSON.stringify(featuredSan) : null,
+          isCompleteParam,
+          typeof presetIdSql === "string" ? presetIdSql : null,
+          presetIdSql === null ? 1 : 0,
+          hasCL ? clUpdate : null,
+          hasPenalty ? penaltyUpdate : null,
+        ]
       );
-      presetIdSql = chk.rows.length ? chk.rows[0].id : null;
-    } else {
-      presetIdSql = null;
+
+      if (rows.length) await snapshotAndPush(key);
+      res.json({
+        ok: true,
+        stateUpdated: shouldUpdateState,
+        costProfileId: rows[0]?.cost_profile_id ?? null,
+        costLimit: Number(rows[0]?.cost_limit),
+        penaltyPerPoint: rows[0]?.penalty_per_point,
+      });
+    } catch (e) {
+      console.error(e);
+      res.status(500).json({ error: "Failed to update session" });
     }
   }
-
-  // Optional cost updates
-  const hasCL = Object.prototype.hasOwnProperty.call(req.body ?? {}, "costLimit");
-  const hasPenalty = Object.prototype.hasOwnProperty.call(req.body ?? {}, "penaltyPerPoint");
-
-  const parsedCL = Number(costLimitRaw);
-  const clUpdate = hasCL && Number.isFinite(parsedCL) && parsedCL > 0 ? parsedCL : null;
-
-  const parsedPenalty = Number(penaltyRaw);
-  const penaltyUpdate =
-    hasPenalty && Number.isFinite(parsedPenalty) && parsedPenalty > 0
-      ? Math.floor(parsedPenalty)
-      : null;
-
-  try {
-    const featuredSan = Array.isArray(featured) ? sanitizeFeatured(featured) : null;
-
-    const { rows } = await pool.query(
-      `UPDATE hsr_draft_sessions
-          SET state = COALESCE($2::jsonb, state),
-              featured = COALESCE($3::jsonb, featured),
-              is_complete = COALESCE($4::boolean, is_complete),
-              completed_at = CASE WHEN $4::boolean IS TRUE AND completed_at IS NULL THEN now() ELSE completed_at END,
-              cost_profile_id = COALESCE($5::uuid,
-                                 CASE WHEN $6::int = 1 THEN NULL ELSE cost_profile_id END),
-              cost_limit = COALESCE($7::numeric, cost_limit),
-              penalty_per_point = COALESCE($8::int, penalty_per_point),
-              last_activity_at = now()
-        WHERE session_key = $1::text
-        RETURNING mode, team1, team2, state, featured, is_complete, last_activity_at, completed_at,
-                  cost_profile_id, cost_limit, penalty_per_point`,
-      [
-        key,
-        stateJson,
-        featuredSan ? JSON.stringify(featuredSan) : null,
-        isCompleteParam,
-        typeof presetIdSql === "string" ? presetIdSql : null,
-        presetIdSql === null ? 1 : 0,
-        hasCL ? clUpdate : null,
-        hasPenalty ? penaltyUpdate : null,
-      ]
-    );
-
-    if (rows.length) await snapshotAndPush(key);
-    res.json({
-      ok: true,
-      stateUpdated: shouldUpdateState,
-      costProfileId: rows[0]?.cost_profile_id ?? null,
-      costLimit: Number(rows[0]?.cost_limit),
-      penaltyPerPoint: rows[0]?.penalty_per_point,
-    });
-  } catch (e) {
-    console.error(e);
-    res.status(500).json({ error: "Failed to update session" });
-  }
-});
+);
 
 /* ───────────────── OWNER: fetch my open (unfinished) session ───────────────── */
 router.get("/api/hsr/sessions/open", requireLogin, async (req, res): Promise<void> => {
@@ -625,7 +802,8 @@ router.get("/api/hsr/sessions/:key", async (req, res) => {
       WHERE s.session_key = $1::text`,
       [key]
     );
-    if (!rows.length) return void res.status(404).json({ error: "Session not found" });
+    if (!rows.length)
+      return void res.status(404).json({ error: "Session not found" });
     res.json(shapeSessionRow(rows[0]));
   } catch (e) {
     console.error(e);
@@ -636,7 +814,9 @@ router.get("/api/hsr/sessions/:key", async (req, res) => {
 /* ───────────────── RECENT completed matches (public) ───────────────── */
 router.get("/api/hsr/matches/recent", async (req, res): Promise<void> => {
   const rawLimit = Number(req.query.limit);
-  const limit = Number.isFinite(rawLimit) ? Math.max(1, Math.min(50, rawLimit)) : 12;
+  const limit = Number.isFinite(rawLimit)
+    ? Math.max(1, Math.min(50, rawLimit))
+    : 12;
 
   try {
     const { rows } = await pool.query(
@@ -673,10 +853,13 @@ router.get("/api/hsr/matches/recent", async (req, res): Promise<void> => {
 /* ───────────────── LIVE drafts (public) ───────────────── */
 router.get("/api/hsr/matches/live", async (req, res): Promise<void> => {
   const rawLimit = Number(req.query.limit);
-  const limit = Number.isFinite(rawLimit) ? Math.max(1, Math.min(25, rawLimit)) : 8;
+  const limit = Number.isFinite(rawLimit)
+    ? Math.max(1, Math.min(25, rawLimit))
+    : 8;
 
   const rawMinutes = Number(req.query.minutes);
-  const minutes = Number.isFinite(rawMinutes) && rawMinutes > 0 ? rawMinutes : 120;
+  const minutes =
+    Number.isFinite(rawMinutes) && rawMinutes > 0 ? rawMinutes : 120;
 
   try {
     const { rows } = await pool.query(
@@ -738,37 +921,43 @@ router.get("/api/hsr/sessions/:key/stream", async (req, res) => {
     return;
   }
 
+  const shaped = shapeSessionRow(rows[0]);
   addClient(key, res);
-  res.write(`event: snapshot\ndata: ${JSON.stringify(shapeSessionRow(rows[0]))}\n\n`);
+  sessionCache.set(key, shaped);
+  res.write(`event: snapshot\ndata: ${JSON.stringify(shaped)}\n\n`);
+  startTicker(key);
 
   const ping = setInterval(() => res.write(": keep-alive\n\n"), 25_000);
   req.on("close", () => clearInterval(ping));
 });
 
 /* ───────────────── Resolve which side a player token belongs to ───────────────── */
-router.get("/api/hsr/sessions/:key/resolve-token", async (req, res): Promise<void> => {
-  const { key } = req.params as { key: string };
-  const pt = String(req.query.pt || "");
+router.get(
+  "/api/hsr/sessions/:key/resolve-token",
+  async (req, res): Promise<void> => {
+    const { key } = req.params as { key: string };
+    const pt = String(req.query.pt || "");
 
-  if (!pt) {
-    res.status(400).json({ error: "Missing pt" });
-    return;
+    if (!pt) {
+      res.status(400).json({ error: "Missing pt" });
+      return;
+    }
+
+    const q = await pool.query(
+      `SELECT blue_token, red_token FROM hsr_draft_sessions WHERE session_key = $1::text`,
+      [key]
+    );
+    if (q.rows.length === 0) {
+      res.status(404).json({ error: "Session not found" });
+      return;
+    }
+    const row = q.rows[0];
+    if (row.blue_token === pt) return void res.json({ side: "B" });
+    if (row.red_token === pt) return void res.json({ side: "R" });
+
+    res.status(403).json({ error: "Invalid player token" });
   }
-
-  const q = await pool.query(
-    `SELECT blue_token, red_token FROM hsr_draft_sessions WHERE session_key = $1::text`,
-    [key]
-  );
-  if (q.rows.length === 0) {
-    res.status(404).json({ error: "Session not found" });
-    return;
-  }
-  const row = q.rows[0];
-  if (row.blue_token === pt) return void res.json({ side: "B" });
-  if (row.red_token === pt) return void res.json({ side: "R" });
-
-  res.status(403).json({ error: "Invalid player token" });
-});
+);
 
 /* ───────────────── PLAYER ACTIONS (public) ─────────────────
 Body: {
@@ -782,217 +971,280 @@ Body: {
   locked?: boolean
 }
 */
-router.post("/api/hsr/sessions/:key/actions", async (req, res): Promise<void> => {
-  const { key } = req.params as { key: string };
+router.post(
+  "/api/hsr/sessions/:key/actions",
+  async (req, res): Promise<void> => {
+    const { key } = req.params as { key: string };
 
-  // Accept legacy ZZZ op names & body keys
-  let {
-    op,
-    pt,
-    index,
-    characterCode,
-    eidolon,
-    superimpose,
-    lightconeId,
-    wengineId,
-    phase,
-  } = req.body || {};
+    // Accept legacy ZZZ op names & body keys
+    let {
+      op,
+      pt,
+      index,
+      characterCode,
+      eidolon,
+      superimpose,
+      lightconeId,
+      wengineId,
+      phase,
+    } = req.body || {};
 
-  // Alias legacy ops to HSR ops
-  if (op === "setMindscape") op = "setEidolon";
-  if (op === "setWengine") op = "setLightcone";
+    // Alias legacy ops to HSR ops
+    if (op === "setMindscape") op = "setEidolon";
+    if (op === "setWengine") op = "setLightcone";
 
-  // Alias legacy field to HSR field
-  if (lightconeId == null && wengineId != null) {
-    lightconeId = String(wengineId);
-  }
-  
+    // Alias legacy field to HSR field
+    if (lightconeId == null && wengineId != null) {
+      lightconeId = String(wengineId);
+    }
 
-  if (!pt || typeof pt !== "string") {
-    return void res.status(400).json({ error: "Missing pt" });
-  }
-  // NEW: accept `phase` from the HSR client
+    if (!pt || typeof pt !== "string") {
+      return void res.status(400).json({ error: "Missing pt" });
+    }
+    // NEW: accept `phase` from the HSR client
     if (superimpose == null && phase != null) {
-        superimpose = phase;
-    }
-  try {
-    const q = await pool.query(
-      `SELECT mode, team1, team2, state, featured, is_complete, blue_token, red_token
-         FROM hsr_draft_sessions
-        WHERE session_key = $1::text`,
-      [key]
-    );
-    if (q.rows.length === 0) return void res.status(404).json({ error: "Session not found" });
-
-    const row = q.rows[0];
-    if (row.is_complete === true) return void res.status(409).json({ error: "Draft already completed" });
-
-    const playerSide: "B" | "R" | null = row.blue_token === pt ? "B" : row.red_token === pt ? "R" : null;
-    if (!playerSide) return void res.status(403).json({ error: "Invalid player token" });
-
-    const state = row.state as SpectatorState;
-    if (!isValidState(state)) return void res.status(500).json({ error: "Corrupt state" });
-
-    // Featured (narrowed)
-    const featuredList = sanitizeFeatured(row.featured);
-    const characterGlobalBan = new Set(
-      featuredList.filter(isChar).filter((f) => f.rule === "globalBan").map((f) => f.code)
-    );
-    const characterGlobalPick = new Set(
-      featuredList.filter(isChar).filter((f) => f.rule === "globalPick").map((f) => f.code)
-    );
-    const lightconeGlobalBan = new Set(
-      featuredList.filter(isLC).filter((f) => f.rule === "globalBan").map((f) => String(f.id))
-    );
-
-    const opNeedsIndex = new Set(["pick", "ban", "setEidolon", "setSuperimpose", "setLightcone"]).has(op);
-    if (opNeedsIndex) {
-      if (!Number.isInteger(index) || (index as number) < 0) {
-        return void res.status(400).json({ error: "Invalid index" });
-      }
-      if ((index as number) >= state.draftSequence.length) {
-        return void res.status(400).json({ error: "Index out of range" });
-      }
+      superimpose = phase;
     }
 
-    const tokenAtIndex = opNeedsIndex ? state.draftSequence[index as number] : "";
-    const slotSide = opNeedsIndex ? sideOfToken(tokenAtIndex) : "";
-    const isBan = opNeedsIndex ? isBanToken(tokenAtIndex) : false;
+    try {
+      const q = await pool.query(
+        `SELECT mode, team1, team2, state, featured, is_complete, blue_token, red_token
+           FROM hsr_draft_sessions
+          WHERE session_key = $1::text`,
+        [key]
+      );
+      if (q.rows.length === 0)
+        return void res.status(404).json({ error: "Session not found" });
 
-    if (op === "pick") {
-      if (sideLocked(state, playerSide)) return void res.status(409).json({ error: "Side locked" });
-      if (index !== state.currentTurn) return void res.status(409).json({ error: "Not current turn" });
-      if (isBan) return void res.status(400).json({ error: "Cannot pick on ban slot" });
-      if (slotSide !== playerSide) return void res.status(403).json({ error: "Wrong side for this turn" });
-      if (typeof characterCode !== "string" || !characterCode) {
-        return void res.status(400).json({ error: "Missing characterCode" });
-      }
+      const row = q.rows[0];
+      if (row.is_complete === true)
+        return void res.status(409).json({ error: "Draft already completed" });
 
-      if (characterGlobalBan.has(characterCode)) {
-        return void res.status(409).json({ error: "Character is globally banned" });
-      }
+      const playerSide: "B" | "R" | null =
+        row.blue_token === pt ? "B" : row.red_token === pt ? "R" : null;
+      if (!playerSide)
+        return void res.status(403).json({ error: "Invalid player token" });
 
-      // Unique per side (even if globalPick)
-      const mySideCodes = state.picks
-        .map<string | null>((p, i) =>
-          state.draftSequence[i]?.startsWith(playerSide) ? (p ? p.characterCode : null) : null
-        )
-        .filter((v): v is string => typeof v === "string");
+      const state = row.state as SpectatorState;
+      if (!isValidState(state))
+        return void res.status(500).json({ error: "Corrupt state" });
 
-      if (mySideCodes.includes(characterCode)) {
-        return void res.status(409).json({ error: "Character already picked by this side" });
-      }
+      // authoritative burn to *now* before applying any changes
+      let st: any = state;
+      const now = Date.now();
+      st = burnToNow(st, now);
 
-      state.picks[index as number] = {
-        characterCode,
-        eidolon: 0,
-        lightconeId: null,
-        superimpose: 1,
-      };
-      state.currentTurn = Math.min(state.currentTurn + 1, state.draftSequence.length);
-    } else if (op === "ban") {
-      if (sideLocked(state, playerSide)) return void res.status(409).json({ error: "Side locked" });
-      if (index !== state.currentTurn) return void res.status(409).json({ error: "Not current turn" });
-      if (!isBan) return void res.status(400).json({ error: "Not a ban slot" });
-      if (slotSide !== playerSide) return void res.status(403).json({ error: "Wrong side for this turn" });
-      if (typeof characterCode !== "string" || !characterCode) {
-        return void res.status(400).json({ error: "Missing characterCode" });
-      }
+      // Featured (narrowed)
+      const featuredList = sanitizeFeatured(row.featured);
+      const characterGlobalBan = new Set(
+        featuredList
+          .filter(isChar)
+          .filter((f) => f.rule === "globalBan")
+          .map((f) => f.code)
+      );
+      const characterGlobalPick = new Set(
+        featuredList
+          .filter(isChar)
+          .filter((f) => f.rule === "globalPick")
+          .map((f) => f.code)
+      );
+      const lightconeGlobalBan = new Set(
+        featuredList
+          .filter(isLC)
+          .filter((f) => f.rule === "globalBan")
+          .map((f) => String(f.id))
+      );
 
-      if (characterGlobalPick.has(characterCode)) {
-        return void res.status(409).json({
-          error: "Cannot ban: character is globally allowed (globalPick)",
-        });
-      }
-
-      state.picks[index as number] = {
-        characterCode,
-        eidolon: 0,
-        lightconeId: null,
-        superimpose: 1,
-      };
-      state.currentTurn = Math.min(state.currentTurn + 1, state.draftSequence.length);
-    } else if (op === "setEidolon") {
-      if (sideLocked(state, playerSide)) return void res.status(409).json({ error: "Side locked" });
-      if (slotSide !== playerSide || isBan)
-        return void res.status(403).json({ error: "Cannot edit opponent or ban slot" });
-      const slot = state.picks[index as number];
-      if (!slot) return void res.status(409).json({ error: "No character in slot" });
-      slot.eidolon = Math.max(0, Math.min(6, Number(eidolon ?? 0)));
-    } else if (op === "setSuperimpose") {
-      if (sideLocked(state, playerSide)) return void res.status(409).json({ error: "Side locked" });
-      if (slotSide !== playerSide || isBan)
-        return void res.status(403).json({ error: "Cannot edit opponent or ban slot" });
-      const slot = state.picks[index as number];
-      if (!slot) return void res.status(409).json({ error: "No character in slot" });
-      slot.superimpose = Math.max(1, Math.min(5, Number(superimpose ?? 1)));
-    } else if (op === "setLightcone") {
-      if (sideLocked(state, playerSide)) return void res.status(409).json({ error: "Side locked" });
-      if (slotSide !== playerSide || isBan)
-        return void res.status(403).json({ error: "Cannot edit opponent or ban slot" });
-      const slot = state.picks[index as number];
-      if (!slot) return void res.status(409).json({ error: "No character in slot" });
-
-      // Enforce universal ban for Light Cones
-      if (lightconeId != null && String(lightconeId) !== "") {
-        if (lightconeGlobalBan.has(String(lightconeId))) {
-          return void res.status(409).json({ error: "Light Cone is globally banned" });
+      const opNeedsIndex = new Set([
+        "pick",
+        "ban",
+        "setEidolon",
+        "setSuperimpose",
+        "setLightcone",
+      ]).has(op);
+      if (opNeedsIndex) {
+        if (!Number.isInteger(index) || (index as number) < 0) {
+          return void res.status(400).json({ error: "Invalid index" });
+        }
+        if ((index as number) >= st.draftSequence.length) {
+          return void res.status(400).json({ error: "Index out of range" });
         }
       }
 
-      slot.lightconeId =
-        lightconeId == null || String(lightconeId) === "" ? null : String(lightconeId);
-    } else if (op === "setLock") {
-      const { locked } = req.body || {};
-      if (typeof locked !== "boolean")
-        return void res.status(400).json({ error: "Missing 'locked' boolean" });
-      if (locked === false)
-        return void res.status(403).json({ error: "Unlock not allowed here" });
-      if (state.currentTurn < state.draftSequence.length) {
-        return void res.status(409).json({ error: "Draft not complete" });
+      const tokenAtIndex = opNeedsIndex ? st.draftSequence[index as number] : "";
+      const slotSide = opNeedsIndex ? sideOfTokenStrict(tokenAtIndex) : "";
+      const isBan = opNeedsIndex ? isBanToken(tokenAtIndex) : false;
+
+      if (op === "pick") {
+        if (sideLocked(st, playerSide))
+          return void res.status(409).json({ error: "Side locked" });
+        if (index !== st.currentTurn)
+          return void res.status(409).json({ error: "Not current turn" });
+        if (isBan)
+          return void res.status(400).json({ error: "Cannot pick on ban slot" });
+        if (slotSide !== playerSide)
+          return void res.status(403).json({ error: "Wrong side for this turn" });
+        if (typeof characterCode !== "string" || !characterCode) {
+          return void res.status(400).json({ error: "Missing characterCode" });
+        }
+
+        if (characterGlobalBan.has(characterCode)) {
+          return void res
+            .status(409)
+            .json({ error: "Character is globally banned" });
+        }
+
+        // Unique per side (even if globalPick)
+        const mySideCodes: string[] = (st.picks as (ServerPick | null)[])
+          .map((p: ServerPick | null, i: number): string | null =>
+            st.draftSequence[i]?.startsWith(playerSide) ? (p ? p.characterCode : null) : null
+          )
+          .filter((v): v is string => typeof v === "string");
+
+        if (mySideCodes.includes(characterCode)) {
+          return void res
+            .status(409)
+            .json({ error: "Character already picked by this side" });
+        }
+
+        st.picks[index as number] = {
+          characterCode,
+          eidolon: 0,
+          lightconeId: null,
+          superimpose: 1,
+        };
+        st.currentTurn = Math.min(
+          st.currentTurn + 1,
+          st.draftSequence.length
+        );
+        st = resetGraceForNewTurn(st, now);
+      } else if (op === "ban") {
+        if (sideLocked(st, playerSide))
+          return void res.status(409).json({ error: "Side locked" });
+        if (index !== st.currentTurn)
+          return void res.status(409).json({ error: "Not current turn" });
+        if (!isBan) return void res.status(400).json({ error: "Not a ban slot" });
+        if (slotSide !== playerSide)
+          return void res.status(403).json({ error: "Wrong side for this turn" });
+        if (typeof characterCode !== "string" || !characterCode) {
+          return void res.status(400).json({ error: "Missing characterCode" });
+        }
+
+        if (characterGlobalPick.has(characterCode)) {
+          return void res.status(409).json({
+            error: "Cannot ban: character is globally allowed (globalPick)",
+          });
+        }
+
+        st.picks[index as number] = {
+          characterCode,
+          eidolon: 0,
+          lightconeId: null,
+          superimpose: 1,
+        };
+        st.currentTurn = Math.min(
+          st.currentTurn + 1,
+          st.draftSequence.length
+        );
+        st = resetGraceForNewTurn(st, now);
+      } else if (op === "setEidolon") {
+        if (sideLocked(st, playerSide))
+          return void res.status(409).json({ error: "Side locked" });
+        if (slotSide !== playerSide || isBan)
+          return void res
+            .status(403)
+            .json({ error: "Cannot edit opponent or ban slot" });
+        const slot = st.picks[index as number];
+        if (!slot) return void res.status(409).json({ error: "No character in slot" });
+        slot.eidolon = Math.max(0, Math.min(6, Number(eidolon ?? 0)));
+      } else if (op === "setSuperimpose") {
+        if (sideLocked(st, playerSide))
+          return void res.status(409).json({ error: "Side locked" });
+        if (slotSide !== playerSide || isBan)
+          return void res
+            .status(403)
+            .json({ error: "Cannot edit opponent or ban slot" });
+        const slot = st.picks[index as number];
+        if (!slot) return void res.status(409).json({ error: "No character in slot" });
+        slot.superimpose = Math.max(1, Math.min(5, Number(superimpose ?? 1)));
+      } else if (op === "setLightcone") {
+        if (sideLocked(st, playerSide))
+          return void res.status(409).json({ error: "Side locked" });
+        if (slotSide !== playerSide || isBan)
+          return void res
+            .status(403)
+            .json({ error: "Cannot edit opponent or ban slot" });
+        const slot = st.picks[index as number];
+        if (!slot) return void res.status(409).json({ error: "No character in slot" });
+
+        // Enforce universal ban for Light Cones
+        if (lightconeId != null && String(lightconeId) !== "") {
+          if (lightconeGlobalBan.has(String(lightconeId))) {
+            return void res
+              .status(409)
+              .json({ error: "Light Cone is globally banned" });
+          }
+        }
+
+        slot.lightconeId =
+          lightconeId == null || String(lightconeId) === ""
+            ? null
+            : String(lightconeId);
+      } else if (op === "setLock") {
+        const { locked } = req.body || {};
+        if (typeof locked !== "boolean")
+          return void res.status(400).json({ error: "Missing 'locked' boolean" });
+        if (locked === false)
+          return void res.status(403).json({ error: "Unlock not allowed here" });
+        if (st.currentTurn < st.draftSequence.length) {
+          return void res.status(409).json({ error: "Draft not complete" });
+        }
+        if (playerSide === "B") st.blueLocked = true;
+        else st.redLocked = true;
+      } else if (op === "undoLast") {
+        const lastIdx = st.currentTurn - 1;
+        if (lastIdx < 0) return void res.status(409).json({ error: "Nothing to undo" });
+
+        if (Number.isInteger(index) && index !== lastIdx) {
+          return void res.status(400).json({ error: "Index must equal last turn" });
+        }
+
+        if (sideLocked(st, playerSide))
+          return void res.status(409).json({ error: "Side locked" });
+
+        const lastTok = st.draftSequence[lastIdx];
+        const lastSide = sideOfTok(lastTok);
+        if (lastSide !== playerSide)
+          return void res.status(403).json({ error: "Wrong side for undo" });
+
+        if (!st.picks[lastIdx])
+          return void res.status(409).json({ error: "Slot already empty" });
+        st.picks[lastIdx] = null;
+        st.currentTurn = lastIdx;
+        // after jumping back, give fresh grace for whoever is now active
+        st = resetGraceForNewTurn(st, now);
+      } else {
+        return void res.status(400).json({ error: "Invalid op" });
       }
-      if (playerSide === "B") state.blueLocked = true;
-      else state.redLocked = true;
-    } else if (op === "undoLast") {
-      const lastIdx = state.currentTurn - 1;
-      if (lastIdx < 0) return void res.status(409).json({ error: "Nothing to undo" });
 
-      if (Number.isInteger(index) && index !== lastIdx) {
-        return void res.status(400).json({ error: "Index must equal last turn" });
-      }
+      const upd = await pool.query(
+        `UPDATE hsr_draft_sessions
+            SET state = $2::jsonb,
+                last_activity_at = now()
+          WHERE session_key = $1::text
+          RETURNING mode, team1, team2, state, featured, is_complete, last_activity_at, completed_at,
+                    cost_profile_id, cost_limit, penalty_per_point`,
+        [key, JSON.stringify(st)]
+      );
 
-      if (sideLocked(state, playerSide)) return void res.status(409).json({ error: "Side locked" });
-
-      const lastTok = state.draftSequence[lastIdx];
-      const lastSide = sideOfToken(lastTok);
-      if (lastSide !== playerSide)
-        return void res.status(403).json({ error: "Wrong side for undo" });
-
-      if (!state.picks[lastIdx]) return void res.status(409).json({ error: "Slot already empty" });
-      state.picks[lastIdx] = null;
-      state.currentTurn = lastIdx;
-    } else {
-      return void res.status(400).json({ error: "Invalid op" });
+      if (upd.rows.length) await snapshotAndPush(key);
+      res.json({ ok: true });
+    } catch (e) {
+      console.error(e);
+      res.status(500).json({ error: "Failed to apply action" });
     }
-
-    const upd = await pool.query(
-      `UPDATE hsr_draft_sessions
-          SET state = $2::jsonb,
-              last_activity_at = now()
-        WHERE session_key = $1::text
-        RETURNING mode, team1, team2, state, featured, is_complete, last_activity_at, completed_at,
-                  cost_profile_id, cost_limit, penalty_per_point`,
-      [key, JSON.stringify(state)]
-    );
-
-    if (upd.rows.length) await snapshotAndPush(key);
-    res.json({ ok: true });
-  } catch (e) {
-    console.error(e);
-    res.status(500).json({ error: "Failed to apply action" });
   }
-});
-
+);
 
 /* ───────────────── Cost Presets: list mine (max 2) ───────────────── */
 router.get("/api/hsr/cost-presets/my", requireLogin, async (req, res) => {
@@ -1032,9 +1284,11 @@ router.get("/api/hsr/cost-presets/:id", requireLogin, async (req, res) => {
         WHERE id = $1::uuid`,
       [id]
     );
-    if (q.rows.length === 0) return void res.status(404).json({ error: "Not found" });
+    if (q.rows.length === 0)
+      return void res.status(404).json({ error: "Not found" });
     const r = q.rows[0];
-    if (r.owner_user_id !== viewer.id) return void res.status(403).json({ error: "Forbidden" });
+    if (r.owner_user_id !== viewer.id)
+      return void res.status(403).json({ error: "Forbidden" });
     res.json({
       id: r.id,
       name: r.name,
@@ -1069,7 +1323,12 @@ router.post("/api/hsr/cost-presets", requireLogin, async (req, res) => {
       `INSERT INTO hsr_cost_presets (owner_user_id, name, char_ms, lc_phase)
        VALUES ($1::text, $2::text, $3::jsonb, $4::jsonb)
        RETURNING id, owner_user_id, name, char_ms, lc_phase, created_at, updated_at`,
-      [viewer.id, body.name, JSON.stringify(body.char_ms), JSON.stringify(body.lc_phase)]
+      [
+        viewer.id,
+        body.name,
+        JSON.stringify(body.char_ms),
+        JSON.stringify(body.lc_phase),
+      ]
     );
 
     const r = ins.rows[0];
@@ -1099,7 +1358,8 @@ router.put("/api/hsr/cost-presets/:id", requireLogin, async (req, res) => {
       `SELECT owner_user_id FROM hsr_cost_presets WHERE id = $1::uuid`,
       [id]
     );
-    if (own.rows.length === 0) return void res.status(404).json({ error: "Not found" });
+    if (own.rows.length === 0)
+      return void res.status(404).json({ error: "Not found" });
     if (own.rows[0].owner_user_id !== viewer.id)
       return void res.status(403).json({ error: "Forbidden" });
 
@@ -1138,7 +1398,8 @@ router.delete("/api/hsr/cost-presets/:id", requireLogin, async (req, res) => {
       `SELECT owner_user_id FROM hsr_cost_presets WHERE id = $1::uuid`,
       [id]
     );
-    if (own.rows.length === 0) return void res.status(404).json({ error: "Not found" });
+    if (own.rows.length === 0)
+      return void res.status(404).json({ error: "Not found" });
     if (own.rows[0].owner_user_id !== viewer.id)
       return void res.status(403).json({ error: "Forbidden" });
 
@@ -1151,52 +1412,58 @@ router.delete("/api/hsr/cost-presets/:id", requireLogin, async (req, res) => {
 });
 
 /* ───────────────── DELETE unfinished session (owner only) ───────────────── */
-router.delete("/api/hsr/sessions/:key", requireLogin, async (req, res): Promise<void> => {
-  const viewer = (req as any).user as { id: string };
-  const { key } = req.params as { key: string };
+router.delete(
+  "/api/hsr/sessions/:key",
+  requireLogin,
+  async (req, res): Promise<void> => {
+    const viewer = (req as any).user as { id: string };
+    const { key } = req.params as { key: string };
 
-  try {
-    const chk = await pool.query(
-      `SELECT owner_user_id, is_complete
-         FROM hsr_draft_sessions
-        WHERE session_key = $1::text`,
-      [key]
-    );
+    try {
+      const chk = await pool.query(
+        `SELECT owner_user_id, is_complete
+           FROM hsr_draft_sessions
+          WHERE session_key = $1::text`,
+        [key]
+      );
 
-    if (chk.rows.length === 0) {
-      res.status(404).json({ error: "Session not found" });
-      return;
+      if (chk.rows.length === 0) {
+        res.status(404).json({ error: "Session not found" });
+        return;
+      }
+      const row = chk.rows[0];
+      if (row.owner_user_id !== viewer.id) {
+        res.status(403).json({ error: "Forbidden" });
+        return;
+      }
+      if (row.is_complete === true) {
+        res.status(409).json({ error: "Cannot delete a completed session" });
+        return;
+      }
+
+      const del = await pool.query(
+        `DELETE FROM hsr_draft_sessions
+          WHERE session_key = $1::text
+            AND owner_user_id = $2::text
+            AND (is_complete IS NOT TRUE)
+          RETURNING session_key`,
+        [key, viewer.id]
+      );
+
+      if (del.rows.length === 0) {
+        res
+          .status(404)
+          .json({ error: "Session not found or already finalized" });
+        return;
+      }
+
+      push(key, "deleted", { key });
+      res.json({ ok: true });
+    } catch (e) {
+      console.error(e);
+      res.status(500).json({ error: "Failed to delete session" });
     }
-    const row = chk.rows[0];
-    if (row.owner_user_id !== viewer.id) {
-      res.status(403).json({ error: "Forbidden" });
-      return;
-    }
-    if (row.is_complete === true) {
-      res.status(409).json({ error: "Cannot delete a completed session" });
-      return;
-    }
-
-    const del = await pool.query(
-      `DELETE FROM hsr_draft_sessions
-        WHERE session_key = $1::text
-          AND owner_user_id = $2::text
-          AND (is_complete IS NOT TRUE)
-        RETURNING session_key`,
-      [key, viewer.id]
-    );
-
-    if (del.rows.length === 0) {
-      res.status(404).json({ error: "Session not found or already finalized" });
-      return;
-    }
-
-    push(key, "deleted", { key });
-    res.json({ ok: true });
-  } catch (e) {
-    console.error(e);
-    res.status(500).json({ error: "Failed to delete session" });
   }
-});
+);
 
 export default router;
