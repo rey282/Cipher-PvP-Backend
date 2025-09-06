@@ -16,7 +16,8 @@ const requireLogin: RequestHandler = (req, res, next) => {
 };
 
 /* ───────────────── Mode/type defs ───────────────── */
-type HsrMode = "2ban" | "3ban";
+type HsrMode = "2ban" | "3ban" | "6ban";
+const VALID_MODES: ReadonlySet<HsrMode> = new Set(["2ban","3ban","6ban"]);
 
 /* ───────────────── Timer helpers (authoritative on server) ───────────────── */
 const MOVE_GRACE = 30;
@@ -460,16 +461,12 @@ router.post(
       penaltyPerPoint: penaltyRaw,
     } = req.body || {};
 
-    if (
-      !team1 ||
-      !team2 ||
-      (mode !== "2ban" && mode !== "3ban") ||
-      !state ||
-      !isValidState(state)
-    ) {
-      res.status(400).json({ error: "Missing or invalid body" });
-      return;
-    }
+    const modeStr = String(mode) as HsrMode;
+
+    if (!team1 || !team2 || !VALID_MODES.has(modeStr) || !state || !isValidState(state)) {
+    res.status(400).json({ error: "Missing or invalid body" });
+    return;
+  }
 
     // merge timer/paused into state we persist
     const normalizedState = normalizeIncomingState(state);
@@ -569,7 +566,7 @@ router.post(
         [
           key,
           viewer.id,
-          mode,
+          modeStr,
           team1,
           team2,
           JSON.stringify(mergedState),
