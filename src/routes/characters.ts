@@ -19,7 +19,7 @@ router.get("/api/characters", async (req, res) => {
   }
 
   const q = `
-    SELECT code, name, rarity, image_url, path, element,
+    SELECT code, name, subname, rarity, image_url, path, element,
            appearance_count, pick_count, ban_count,
            preban_count, joker_count,
            e0_uses, e1_uses, e2_uses, e3_uses, e4_uses, e5_uses, e6_uses,
@@ -34,6 +34,10 @@ router.get("/api/characters", async (req, res) => {
 
   try {
     const { rows } = await pool.query(q);
+    const data = rows.map(r => ({
+      ...r,
+      subname: r.subname ?? null
+    }));
     const response = { data: rows, lastFetched: new Date().toISOString() };
     cache.set(cacheKey, response);
     res.json(response);
