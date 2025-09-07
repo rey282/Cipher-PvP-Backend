@@ -2,15 +2,16 @@ import express from 'express';
 import cors from 'cors';
 import dotenv from 'dotenv';
 import rateLimit from 'express-rate-limit';
-import NodeCache from 'node-cache';
 import helmet from 'helmet';
 import session from 'express-session';
 import type { Request, Response } from "express";
 import pgSession from 'connect-pg-simple';
 import passport from 'passport';
+
 import { discordAuthRouter } from './auth/discord';
 import { pool } from './db';
-import rosterRouter from "./routes/roster"; 
+
+import rosterRouter from "./routes/roster";
 import announcementRouter from "./routes/announcement";
 
 import charactersRouter from "./routes/characters";
@@ -26,6 +27,15 @@ import cipherCostRouter from "./routes/ciphercost";
 import zzzSpectatorRoutes from "./routes/zzzSpectator";
 import hsrSpectatorRoutes from "./routes/hsrSpectator";
 
+// ⬇️ scoped limiters
+import {
+  publicLimiter,
+  draftActionLimiter,
+  ownerLimiter,
+  DRAFT_ROOT_RE,
+  SSE_STREAM_RE,
+} from "./middleware/rateLimiters";
+
 dotenv.config();
 
 const requiredEnvs = ['DATABASE_URL', 'SESSION_SECRET'];
@@ -39,19 +49,27 @@ for (const name of requiredEnvs) {
 const app = express();
 app.set('trust proxy', 1);
 const PORT = process.env.PORT || 3001;
-
 const isProd = process.env.NODE_ENV === 'production';
 
-// ───── Rate limiting ─────
+/* ───────── Global (fallback) limiter ─────────
+   Applied to everything EXCEPT drafting routes (including SSE).
+   Also skips health checks and CORS preflights. */
 const globalLimiter = rateLimit({
   windowMs: 15 * 60 * 1000,
   max: 100,
   standardHeaders: true,
   legacyHeaders: false,
-  message: { status: 429, error: 'Too many requests – please try again later.' }
+  skip: (req) =>
+    req.method === "OPTIONS" ||
+    req.path === "/ping" ||
+    req.path === "/healthz",
+  handler: (_req, res) => {
+    res.setHeader("Retry-After", "5");
+    res.status(429).json({ status: 429, error: 'Too many requests – please try again later.' });
+  },
 });
 
-// ───── Middleware ─────
+/* ───────── CORS ───────── */
 app.use(cors({
   origin: (origin, callback) => {
     if (!origin) return callback(null, true);
@@ -66,9 +84,9 @@ app.use(cors({
       const hostname = url.hostname;
 
       if (
-        hostname.endsWith('.cipher.uno') ||  
-        hostname === 'cipher.uno' ||        
-        allowedHostnames.includes(hostname)  
+        hostname.endsWith('.cipher.uno') ||
+        hostname === 'cipher.uno' ||
+        allowedHostnames.includes(hostname)
       ) {
         return callback(null, true);
       }
@@ -81,14 +99,11 @@ app.use(cors({
   credentials: true,
 }));
 
-// ───── Sessions (PostgreSQL-backed) ─────
+/* ───────── Sessions (PostgreSQL-backed) ───────── */
 const PgSession = pgSession(session);
 app.use(session({
   name: 'cid',
-  store: new PgSession({
-    pool,
-    tableName: 'session'
-  }),
+  store: new PgSession({ pool, tableName: 'session' }),
   secret: process.env.SESSION_SECRET!,
   resave: false,
   saveUninitialized: false,
@@ -101,14 +116,43 @@ app.use(session({
   }
 }));
 
-// ───── Passport + security ─────
+/* ───────── Security & body parsing ───────── */
 app.use(passport.initialize());
 app.use(passport.session());
-app.use(globalLimiter);
 app.use(helmet());
 app.use(express.json({ limit: '1mb' }));
 
-// ───── routes ─────
+/* ───────── Apply global limiter EXCEPT for drafting ───────── */
+app.use((req, res, next) => {
+  if (DRAFT_ROOT_RE.test(req.path) || SSE_STREAM_RE.test(req.path)) {
+    return next();
+  }
+  return globalLimiter(req, res, next);
+});
+
+/* ───────── Scoped rate limiters for DRAFTING only ───────── */
+// Public lists
+app.use("/api/hsr/matches/recent", publicLimiter);
+app.use("/api/hsr/matches/live", publicLimiter);
+app.use("/api/zzz/matches/recent", publicLimiter);
+app.use("/api/zzz/matches/live", publicLimiter);
+
+// Draft write actions (per-session/per-player)
+app.use("/api/hsr/sessions/:key/actions", draftActionLimiter);
+app.use("/api/zzz/sessions/:key/actions", draftActionLimiter);
+
+// Owner mutations
+app.use("/api/hsr/sessions", ownerLimiter);
+app.use("/api/hsr/sessions/:key", ownerLimiter);
+app.use("/api/hsr/cost-presets", ownerLimiter);
+app.use("/api/hsr/cost-presets/:id", ownerLimiter);
+
+app.use("/api/zzz/sessions", ownerLimiter);
+app.use("/api/zzz/sessions/:key", ownerLimiter);
+app.use("/api/zzz/cost-presets", ownerLimiter);
+app.use("/api/zzz/cost-presets/:id", ownerLimiter);
+
+/* ───────── Routes ───────── */
 app.use(rosterRouter);
 app.use("/api/announcement", announcementRouter);
 app.use("/auth", discordAuthRouter);
@@ -125,23 +169,21 @@ app.use(cipherCostRouter);
 app.use(zzzSpectatorRoutes);
 app.use(hsrSpectatorRoutes);
 
-// ───── Root + Cache ─────
+/* ───────── Root & Health ───────── */
 app.get("/", (_req: Request, res: Response) => {
   res.send("API is running.");
 });
 
-
-/* ─────────── health check ─────────── */
 app.get("/ping", (_req, res) => {
   res.status(200).send("pong");
 });
 
-/* ─────────── 404 fallback ─────────── */
+/* ───────── 404 fallback ───────── */
 app.use((_, res, _next) => {
   res.status(404).json({ error: 'Not Found' });
 });
 
-/* ─────────── start ─────────── */
+/* ───────── start ───────── */
 app.listen(PORT, () => {
   console.log(`✅ Backend running on ${isProd ? "https://spajaja.cipher.uno" : `http://localhost:${PORT}`}`);
 });

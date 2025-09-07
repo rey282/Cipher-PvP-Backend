@@ -370,33 +370,62 @@ function push(key: string, event: string, payload: any) {
 
 function startTicker(key: string) {
   if (tickers.has(key)) return;
+
+  // remember last minimal timer payload signature so we only push on change
+  let lastSig = "";
+
   const h = setInterval(() => {
     const payload = sessionCache.get(key);
     if (!payload) return;
+
     const base = payload.state || {};
     const now = Date.now();
 
-    // compute *view* only; don't touch DB here
+    // If timer isn't enabled, or we're paused/frozen at this turn, skip the work.
+    // (burnToNow() handles these conditions too, but short-circuiting saves CPU across many rooms.)
+    if (!base.timerEnabled) return;
+
+    const tok = base.draftSequence?.[base.currentTurn] || "";
+    const side = sideOfTok(tok);
+    const frozen = isFirstBanForSide(base.currentTurn, base.draftSequence || []);
+    if (!side || base.paused?.[side] || frozen) return;
+
+    // compute view only; don't touch DB
     const burned = burnToNow(base, now);
 
-    // store in cache so next tick burns from this moment
+    // store in cache so the next burn diff is from "now"
     const nextPayload = { ...payload, state: burned };
     sessionCache.set(key, nextPayload);
 
-    // stream minimal timer state
-    push(key, "timer", {
-      state: {
-        timerEnabled: !!burned.timerEnabled,
-        paused: burned.paused,
-        reserveLeft: burned.reserveLeft,
-        graceLeft: burned.graceLeft,
-        timerUpdatedAt: burned.timerUpdatedAt,
-        currentTurn: burned.currentTurn,
-      },
+    // Build a tiny signature of the timer-relevant fields
+    const sig = JSON.stringify({
+      te: !!burned.timerEnabled,
+      pB: !!burned.paused?.B,
+      pR: !!burned.paused?.R,
+      rB: burned.reserveLeft?.B ?? 0,
+      rR: burned.reserveLeft?.R ?? 0,
+      g:  burned.graceLeft ?? 0,
+      t:  burned.currentTurn ?? 0,
     });
-  }, 250);
+
+    if (sig !== lastSig) {
+      lastSig = sig;
+      push(key, "timer", {
+        state: {
+          timerEnabled: !!burned.timerEnabled,
+          paused: burned.paused,
+          reserveLeft: burned.reserveLeft,
+          graceLeft: burned.graceLeft,
+          timerUpdatedAt: burned.timerUpdatedAt,
+          currentTurn: burned.currentTurn,
+        },
+      });
+    }
+  }, 1000); // ← 250 → 1000ms
+
   tickers.set(key, h);
 }
+
 
 async function snapshotAndPush(key: string) {
   const { rows } = await pool.query(
@@ -839,7 +868,7 @@ router.get("/api/hsr/matches/recent", async (req, res): Promise<void> => {
       costLimit: Number(r.cost_limit),
       penaltyPerPoint: r.penalty_per_point,
     }));
-
+    res.setHeader("Cache-Control", "public, max-age=10");
     res.json({ data });
   } catch (e) {
     console.error(e);
@@ -882,7 +911,7 @@ router.get("/api/hsr/matches/live", async (req, res): Promise<void> => {
       costLimit: Number(r.cost_limit),
       penaltyPerPoint: r.penalty_per_point,
     }));
-
+    res.setHeader("Cache-Control", "public, max-age=5");
     res.json({ data });
   } catch (e) {
     console.error(e);

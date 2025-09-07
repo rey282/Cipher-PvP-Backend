@@ -612,7 +612,7 @@ router.get(
         costLimit: Number(r.cost_limit),
         penaltyPerPoint: r.penalty_per_point,
       }));
-
+      res.set("Cache-Control", "public, max-age=10");
       res.json({ data });
     } catch (e) {
       console.error(e);
@@ -667,7 +667,7 @@ router.get(
         costLimit: Number(r.cost_limit),
         penaltyPerPoint: r.penalty_per_point,
       }));
-
+      res.set("Cache-Control", "public, max-age=10");
       res.json({ data });
     } catch (e) {
       console.error(e);
