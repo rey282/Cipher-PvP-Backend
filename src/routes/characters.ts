@@ -64,30 +64,42 @@ router.get("/api/characters/all", async (_req, res) => {
     WITH u AS (
       ${unionQuery}
     ),
-    grouped AS (
+    agg AS (
       SELECT
-        code, name, subname, rarity, image_url, path, element,
-        COALESCE(SUM(appearance_count),0)::int AS appearance_count,
-        COALESCE(SUM(pick_count),0)::int AS pick_count,
-        COALESCE(SUM(ban_count),0)::int AS ban_count,
-        COALESCE(SUM(preban_count),0)::int AS preban_count,
-        COALESCE(SUM(joker_count),0)::int AS joker_count,
-        COALESCE(SUM(e0_uses),0)::int AS e0_uses,  COALESCE(SUM(e0_wins),0)::int AS e0_wins,
-        COALESCE(SUM(e1_uses),0)::int AS e1_uses,  COALESCE(SUM(e1_wins),0)::int AS e1_wins,
-        COALESCE(SUM(e2_uses),0)::int AS e2_uses,  COALESCE(SUM(e2_wins),0)::int AS e2_wins,
-        COALESCE(SUM(e3_uses),0)::int AS e3_uses,  COALESCE(SUM(e3_wins),0)::int AS e3_wins,
-        COALESCE(SUM(e4_uses),0)::int AS e4_uses,  COALESCE(SUM(e4_wins),0)::int AS e4_wins,
-        COALESCE(SUM(e5_uses),0)::int AS e5_uses,  COALESCE(SUM(e5_wins),0)::int AS e5_wins,
-        COALESCE(SUM(e6_uses),0)::int AS e6_uses,  COALESCE(SUM(e6_wins),0)::int AS e6_wins
+        code,
+        SUM(appearance_count)::int AS appearance_count,
+        SUM(pick_count)::int       AS pick_count,
+        SUM(ban_count)::int        AS ban_count,
+        SUM(preban_count)::int     AS preban_count,
+        SUM(joker_count)::int      AS joker_count,
+
+        SUM(e0_uses)::int AS e0_uses, SUM(e0_wins)::int AS e0_wins,
+        SUM(e1_uses)::int AS e1_uses, SUM(e1_wins)::int AS e1_wins,
+        SUM(e2_uses)::int AS e2_uses, SUM(e2_wins)::int AS e2_wins,
+        SUM(e3_uses)::int AS e3_uses, SUM(e3_wins)::int AS e3_wins,
+        SUM(e4_uses)::int AS e4_uses, SUM(e4_wins)::int AS e4_wins,
+        SUM(e5_uses)::int AS e5_uses, SUM(e5_wins)::int AS e5_wins,
+        SUM(e6_uses)::int AS e6_uses, SUM(e6_wins)::int AS e6_wins
       FROM u
-      GROUP BY code, name, subname, rarity, image_url, path, element
+      GROUP BY code
+    ),
+    labels AS (
+      SELECT DISTINCT ON (code)
+        code, name, subname, rarity, image_url, path, element
+      FROM u
+      ORDER BY code
     )
-    SELECT *,
-           (e0_uses+e1_uses+e2_uses+e3_uses+e4_uses+e5_uses+e6_uses)::int AS total_uses,
-           (e0_wins+e1_wins+e2_wins+e3_wins+e4_wins+e5_wins+e6_wins)::int AS total_wins,
-           (e0_uses+e1_uses+e2_uses+e3_uses+e4_uses+e5_uses+e6_uses
-          - e0_wins-e1_wins-e2_wins-e3_wins-e4_wins-e5_wins-e6_wins)::int AS total_losses
-    FROM grouped
+    SELECT
+      l.code, l.name, l.subname, l.rarity, l.image_url, l.path, l.element,
+      a.*,
+      (a.e0_uses+a.e1_uses+a.e2_uses+a.e3_uses+a.e4_uses+a.e5_uses+a.e6_uses) AS total_uses,
+      (a.e0_wins+a.e1_wins+a.e2_wins+a.e3_wins+a.e4_wins+a.e5_wins+a.e6_wins) AS total_wins,
+      (
+        (a.e0_uses+a.e1_uses+a.e2_uses+a.e3_uses+a.e4_uses+a.e5_uses+a.e6_uses) -
+        (a.e0_wins+a.e1_wins+a.e2_wins+a.e3_wins+a.e4_wins+a.e5_wins+a.e6_wins)
+      ) AS total_losses
+    FROM agg a
+    JOIN labels l USING (code)
     ORDER BY appearance_count DESC;
   `;
 
