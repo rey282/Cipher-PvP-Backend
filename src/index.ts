@@ -9,7 +9,7 @@ import pgSession from 'connect-pg-simple';
 import passport from 'passport';
 
 import { discordAuthRouter } from './auth/discord';
-import { pool } from './db';
+import { pool } from './db';   // ⬅️ same pool as above
 
 import rosterRouter from "./routes/roster";
 import announcementRouter from "./routes/announcement";
@@ -51,9 +51,7 @@ app.set('trust proxy', 1);
 const PORT = process.env.PORT || 3001;
 const isProd = process.env.NODE_ENV === 'production';
 
-/* ───────── Global (fallback) limiter ─────────
-   Applied to everything EXCEPT drafting routes (including SSE).
-   Also skips health checks and CORS preflights. */
+/* ───────── Global limiter ───────── */
 const globalLimiter = rateLimit({
   windowMs: 15 * 60 * 1000,
   max: 100,
@@ -99,11 +97,16 @@ app.use(cors({
   credentials: true,
 }));
 
-/* ───────── Sessions (PostgreSQL-backed) ───────── */
+/* ───────── Sessions ───────── */
 const PgSession = pgSession(session);
 app.use(session({
   name: 'cid',
-  store: new PgSession({ pool, tableName: 'session' }),
+  store: new PgSession({
+    pool,
+    tableName: 'session',
+    createTableIfMissing: true,    
+    pruneSessionInterval: 60 * 60, 
+  }),
   secret: process.env.SESSION_SECRET!,
   resave: false,
   saveUninitialized: false,
@@ -122,7 +125,7 @@ app.use(passport.session());
 app.use(helmet());
 app.use(express.json({ limit: '1mb' }));
 
-/* ───────── Apply global limiter EXCEPT for drafting ───────── */
+/* ───────── Apply global limiter EXCEPT drafting ───────── */
 app.use((req, res, next) => {
   if (DRAFT_ROOT_RE.test(req.path) || SSE_STREAM_RE.test(req.path)) {
     return next();
@@ -131,17 +134,14 @@ app.use((req, res, next) => {
 });
 
 /* ───────── Scoped rate limiters for DRAFTING only ───────── */
-// Public lists
 app.use("/api/hsr/matches/recent", publicLimiter);
 app.use("/api/hsr/matches/live", publicLimiter);
 app.use("/api/zzz/matches/recent", publicLimiter);
 app.use("/api/zzz/matches/live", publicLimiter);
 
-// Draft write actions (per-session/per-player)
 app.use("/api/hsr/sessions/:key/actions", draftActionLimiter);
 app.use("/api/zzz/sessions/:key/actions", draftActionLimiter);
 
-// Owner mutations
 app.use("/api/hsr/sessions", ownerLimiter);
 app.use("/api/hsr/sessions/:key", ownerLimiter);
 app.use("/api/hsr/cost-presets", ownerLimiter);
@@ -176,6 +176,16 @@ app.get("/", (_req: Request, res: Response) => {
 
 app.get("/ping", (_req, res) => {
   res.status(200).send("pong");
+});
+
+app.get("/healthz", async (_req, res) => {
+  try {
+    const r = await pool.query("select 1 as ok");
+    res.json({ ok: r.rows?.[0]?.ok === 1 });
+  } catch (e) {
+    console.error("DB healthcheck failed:", e);
+    res.status(500).json({ ok: false });
+  }
 });
 
 /* ───────── 404 fallback ───────── */
