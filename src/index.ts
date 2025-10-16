@@ -103,7 +103,6 @@ app.use(session({
   name: 'cid',
   store: new PgSession({
     pool,
-    schemaName: 'public', 
     tableName: 'session',
     createTableIfMissing: true,    
     pruneSessionInterval: 60 * 60, 
