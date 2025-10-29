@@ -9,7 +9,7 @@ import pgSession from 'connect-pg-simple';
 import passport from 'passport';
 
 import { discordAuthRouter } from './auth/discord';
-import { pool } from './db';   // ⬅️ same pool as above
+import { pool } from './db'; 
 
 import rosterRouter from "./routes/roster";
 import announcementRouter from "./routes/announcement";
@@ -27,7 +27,7 @@ import cipherCostRouter from "./routes/ciphercost";
 import zzzSpectatorRoutes from "./routes/zzzSpectator";
 import hsrSpectatorRoutes from "./routes/hsrSpectator";
 
-// ⬇️ scoped limiters
+// scoped limiters
 import {
   publicLimiter,
   draftActionLimiter,
@@ -74,6 +74,7 @@ app.use(cors({
 
     const allowedHostnames = [
       'localhost',
+      '127.0.0.1',
       'haya-pvp.vercel.app',
     ];
 
