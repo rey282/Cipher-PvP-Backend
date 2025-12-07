@@ -26,6 +26,8 @@ import zzzRouter from "./routes/zzz";
 import cipherCostRouter from "./routes/ciphercost";
 import zzzSpectatorRoutes from "./routes/zzzSpectator";
 import hsrSpectatorRoutes from "./routes/hsrSpectator";
+import zzzBalanceRouter from "./routes/zzz-balance";
+
 
 // scoped limiters
 import {
@@ -53,8 +55,8 @@ const isProd = process.env.NODE_ENV === 'production';
 
 /* ───────── Global limiter ───────── */
 const globalLimiter = rateLimit({
-  windowMs: 15 * 60 * 1000,
-  max: 100,
+  windowMs: 60 * 1000,  
+  max: 2000,             
   standardHeaders: true,
   legacyHeaders: false,
   skip: (req) =>
@@ -63,9 +65,13 @@ const globalLimiter = rateLimit({
     req.path === "/healthz",
   handler: (_req, res) => {
     res.setHeader("Retry-After", "5");
-    res.status(429).json({ status: 429, error: 'Too many requests – please try again later.' });
+    res.status(429).json({
+      status: 429,
+      error: "Too many requests – please try again later.",
+    });
   },
 });
+
 
 /* ───────── CORS ───────── */
 app.use(cors({
@@ -168,6 +174,7 @@ app.use(insightsRouter);
 app.use("/api/zzz", zzzRouter);
 app.use(cipherCostRouter);
 app.use(zzzSpectatorRoutes);
+app.use(zzzBalanceRouter);
 app.use(hsrSpectatorRoutes);
 
 /* ───────── Root & Health ───────── */

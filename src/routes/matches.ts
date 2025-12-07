@@ -140,8 +140,19 @@ router.get("/api/player/:id/matches", matchLimiter, async (req, res) => {
         result: rd.winner === myTeam ? "win" : "lose",
         teammateNames,
         opponentNames,
-        myPicks: (rd[`${myTeam}_picks`] || []).map((c: any) => c.code),
-        oppPicks: (rd[`${oppTeam}_picks`] || []).map((c: any) => c.code),
+        myPicks: (rd[`${myTeam}_picks`] || []).map((c: any) => ({
+          code: c.code,
+          eidolon: c.eidolon ?? 0,
+          superimposition: c.superimposition ?? 0
+        })),
+
+        oppPicks: (rd[`${oppTeam}_picks`] || []).map((c: any) => ({
+          code: c.code,
+          eidolon: c.eidolon ?? 0,
+          superimposition: c.superimposition ?? 0
+        })),
+
+
         myBans: myBansRaw.map((b: any) => b.code),
         oppBans: oppBansRaw.map((b: any) => b.code),
         prebans: rd.prebans || [],

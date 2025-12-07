@@ -30,7 +30,7 @@ router.post(
     }
 
     try {
-      // Step 1: Fetch old points first
+      //Fetch old points first
       const { rows } = await pool.query(
         `SELECT points FROM players WHERE discord_id = $1;`,
         [discordId]
@@ -46,13 +46,13 @@ router.post(
 
       const oldPoints = rows[0].points;
 
-      // Step 2: Update player points
+      //Update player points
       await pool.query(
         `UPDATE players SET points = $1 WHERE discord_id = $2;`,
         [points, discordId]
       );
 
-      // Step 3: Log change with old + new points
+      //Log change with old + new points
       await pool.query(
         `INSERT INTO roster_log (discord_id, old_points, new_points, submitted_at)
          VALUES ($1, $2, $3, NOW());`,
