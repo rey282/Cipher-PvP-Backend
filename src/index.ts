@@ -198,7 +198,7 @@ app.get("/healthz", async (_req, res) => {
 
 app.post("/proxy/token", express.urlencoded({ extended: true }), async (req, res) => {
   try {
-    // Forward the form data exactly as Discord expects it.
+    // Forward the form data exactly as Discord expects it
     const params = new URLSearchParams(req.body);
 
     const discordRes = await fetch("https://discord.com/api/oauth2/token", {
