@@ -196,6 +196,32 @@ app.get("/healthz", async (_req, res) => {
   }
 });
 
+app.post("/proxy/token", express.urlencoded({ extended: true }), async (req, res) => {
+  try {
+    // Forward the form data exactly as Discord expects it.
+    const params = new URLSearchParams(req.body);
+
+    const discordRes = await fetch("https://discord.com/api/oauth2/token", {
+      method: "POST",
+      headers: { 
+        "Content-Type": "application/x-www-form-urlencoded"
+      },
+      body: params
+    });
+
+    const data = await discordRes.json();
+    res.status(discordRes.status).json(data);
+
+  } catch (error) {
+    console.error("[Discord Proxy Error]", error);
+    const err = error as Error;
+    res.status(500).json({ error: "Proxy failed", details: err.message });
+
+
+  }
+});
+
+
 /* ───────── 404 fallback ───────── */
 app.use((_, res, _next) => {
   res.status(404).json({ error: 'Not Found' });
