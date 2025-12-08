@@ -52,7 +52,7 @@ passport.use(
       callbackURL: process.env.DISCORD_REDIRECT_URI as string,
 
       // ⭐ Add these two:
-      authorizationURL: "https://discord.com/oauth2/authorize",
+      authorizationURL: "https://discord.com/api/oauth2/authorize",
       tokenURL: TOKEN_EXCHANGE_PROXY,
 
       scope: ["identify"],
