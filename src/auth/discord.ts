@@ -9,12 +9,6 @@ import rateLimit from "express-rate-limit";
 dotenv.config();
 const router = Router();
 
-const TOKEN_EXCHANGE_PROXY =
-  process.env.NODE_ENV === "production"
-    ? "https://spajaja.cipher.uno/proxy/token"
-    : "http://localhost:3001/proxy/token";
-
-
 /* ───── Define basic Discord user shape ───── */
 type DiscordUser = {
   id: string;
@@ -50,11 +44,6 @@ passport.use(
       clientID: process.env.DISCORD_CLIENT_ID as string,
       clientSecret: process.env.DISCORD_CLIENT_SECRET as string,
       callbackURL: process.env.DISCORD_REDIRECT_URI as string,
-
-      // ⭐ Add these two:
-      authorizationURL: "https://discord.com/api/oauth2/authorize",
-      tokenURL: TOKEN_EXCHANGE_PROXY,
-
       scope: ["identify"],
     },
     async (
