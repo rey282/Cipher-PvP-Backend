@@ -6,7 +6,7 @@ import { seasonFromQuery } from "../utils/seasons";
 const router = express.Router();
 const cache = new NodeCache({ stdTTL: 600 }); // 10 minutes
 
-// GET /api/insights
+// GET /api/insights.
 router.get("/api/insights", async (req, res) => {
   const seasonKey = req.query.season as string;
   const season = seasonFromQuery(seasonKey);
