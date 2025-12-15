@@ -1,18 +1,19 @@
-# Cipher PvP — Backend System Authority
+# Cipher PvP — Backend System
 
-This repository contains the **Cipher PvP backend**, the authoritative system responsible for authentication, data persistence, rule enforcement, draft lifecycle management, and administrative safety across the Cipher competitive PvP ecosystem.
+This repository contains the **Cipher PvP backend**, which acts as the central authority for authentication, data storage, rule enforcement, drafts, and administrative operations across the Cipher PvP ecosystem.
 
-Unlike the frontend, the backend is a **stateful, authoritative service**.
-All critical logic, validation, and enforcement occur here.
+The backend is a **stateful service** and the **single source of truth** for the system.  
+All validation, enforcement, and persistence happen here.
 
 ---
 
 ## System Context
 
 Cipher PvP is a multi-service system composed of:
-1. **Frontend** — UI, visualization, user interaction
-2. **Backend (this repo)** — Authentication, data persistence, rule enforcement, drafts, and administrative safety
-3. **Discord Bot** — Match ingestion, ELO processing, historical data creation
+
+1. **Frontend** — UI, data presentation, and user interaction  
+2. **Backend (this repo)** — Authentication, persistence, rules, drafts, and admin controls  
+3. **Discord Bot** — Match ingestion, ELO updates, and historical data creation  
 
 This repository represents the **system authority layer**.
 
@@ -20,40 +21,40 @@ This repository represents the **system authority layer**.
 
 ## Core Responsibilities
 
-The backend owns and enforces:
+The backend is responsible for:
 
 - Discord OAuth authentication
-- Session management and identity
-- Database access and seasonal data partitioning
+- Session and identity management
+- Database access and seasonal partitioning
 - Match history and player statistics
-- Draft session lifecycle (HSR & ZZZ)
-- Spectator streaming via Server-Sent Events (SSE)
-- Balance and cost systems
-- Administrative permissions and rollback safety
+- Draft lifecycle management (HSR & ZZZ)
+- Real-time draft updates via Server-Sent Events (SSE)
+- Balance and cost data
+- Administrative actions and rollback safety
 - Rate limiting and abuse protection
 
-No client is trusted to enforce rules.
+Clients are not trusted to enforce rules.
 
 ---
 
 ## Authentication & Identity
 
-### OAuth Authority
-- Discord OAuth is implemented **exclusively** in the backend
+### OAuth
+- Discord OAuth is implemented only in the backend
 - Frontend and other clients never handle OAuth tokens
-- Identity is established once and shared across services
+- Authentication state is shared through server-managed sessions
 
 ### Sessions
 - Sessions are stored in the database
-- Session cookies are scoped to a shared domain
-- All authenticated requests rely on session presence
+- Cookies are scoped to a shared domain
+- All protected endpoints rely on session presence
 
 ### Identity Guarantees
-- Each request resolves to:
+- Each request resolves to either:
   - an authenticated user, or
   - an anonymous user
-- Admin status is resolved server-side
-- Clients cannot self-assign privileges
+- Admin status is determined server-side
+- Clients cannot grant themselves elevated privileges
 
 ---
 
@@ -61,133 +62,133 @@ No client is trusted to enforce rules.
 
 The backend is the **single source of truth** for all persistent data.
 
-### Owned Data Domains
-- Players and profiles
-- Matches and outcomes
+### Data managed by the backend
+- Player accounts and profiles
+- Match records and results
 - Character statistics
-- Seasonal and historical partitions
+- Seasonal and historical datasets
 - Balance and cost values
 - Draft session state
-- Administrative audit logs
+- Administrative audit data
 
-No authoritative data is stored client-side.
+No authoritative data is stored or trusted client-side.
 
 ---
 
 ## Seasons, Cycles & Aggregation
 
 ### Seasons
-- Player and match data is partitioned by season
-- Each season maps to dedicated database tables
-- Seasons are defined centrally and enforced consistently
+- Player and match data is split into seasonal tables
+- Each season maps to a specific set of database tables
+- Season boundaries are defined and enforced centrally
 
 ### Cycles
-- Character statistics are partitioned by balance cycle
-- Each cycle represents a discrete balance window
-- Historical cycles remain queryable
+- Character statistics are tracked per balance cycle
+- Each cycle represents a specific balance window
+- Historical cycles remain accessible for comparison
 
 ### Aggregation
 - All-time views are computed dynamically
-- Aggregation logic is centralized
-- Clients cannot alter aggregation behavior
+- Aggregation logic lives entirely in the backend
+- Clients cannot influence aggregation behavior
 
-This ensures historical accuracy and balance transparency.
+This keeps historical data consistent and reliable.
 
 ---
 
 ## Draft System Authority
 
-Drafts are modeled as **stateful backend-managed sessions**.
+Drafts are handled as **backend-managed sessions**.
 
-### Supported Drafts
+### Supported Draft Types
 - Honkai: Star Rail (HSR)
 - Zenless Zone Zero (ZZZ)
 
 ### Backend Responsibilities
-- Draft creation and ownership
-- Turn order enforcement
-- Pick / ban / ace validation
-- Penalty calculation
-- Action authorization
-- Session persistence
+- Creating and managing draft sessions
+- Enforcing turn order
+- Validating picks, bans, and aces
+- Calculating penalties
+- Authorizing player actions
+- Persisting draft state
 
 ### Spectator Streaming
-- Draft updates are emitted via **Server-Sent Events (SSE)**
-- Spectators receive real-time state updates
-- No polling or reconstruction is required client-side
+- Draft updates are pushed using **Server-Sent Events (SSE)**
+- Spectators receive live state updates
+- No client-side polling or reconstruction is required
 
-The backend is the sole authority on draft legality.
+The backend is the only authority on draft legality.
 
 ---
 
 ## Balance & Cost Systems
 
-The backend maintains multiple balance domains:
+The backend maintains balance data for multiple formats:
 
-- **Cipher** — HSR primary format
+- **Cipher** — HSR main format
 - **Cerydra** — HSR alternate format
 - **Vivian** — ZZZ format
 
 ### Responsibilities
-- Store balance values
-- Validate administrative updates
-- Expose public balance views
-- Maintain historical integrity
+- Store and version balance values
+- Validate administrative balance changes
+- Expose public balance data
+- Preserve historical integrity
 
-Client-side tools may simulate costs, but enforcement occurs here.
+Client tools may simulate costs, but final validation happens here.
 
 ---
 
 ## Administrative Safety Model
 
-Administrative actions are treated as **high-risk operations**.
+Administrative actions are treated as sensitive operations.
 
 ### Admin Authority
 - Admin users are defined server-side
 - Privileges are resolved on every request
-- UI checks are never trusted
+- UI checks are for convenience only
 
 ### Admin Capabilities
-- Match rollback
-- Match refresh
+- Match rollbacks
+- Match refreshes
 - Balance updates
-- Roster auditing
+- Roster audits
 
-### Safety Guarantees
+### Safety Measures
 - Rollbacks are explicit and scoped
 - All admin actions are validated
-- Auditability is preserved
+- Actions are auditable
 
-This design prioritizes system integrity over convenience.
+System integrity is always prioritized over convenience.
 
 ---
 
 ## Rate Limiting & Abuse Protection
 
-The backend applies layered protections:
+The backend applies multiple layers of protection:
 
-- Global rate limits for public endpoints
-- Stricter limits for state-mutating actions
-- Draft interaction limits separated by role
+- Global limits for public endpoints
+- Stricter limits for state-changing operations
+- Separate limits for draft interactions
 - Streaming endpoints excluded from mutation limits
 
-This protects system availability without harming live drafts.
+This helps protect availability without disrupting live drafts.
 
 ---
 
 ## Authority Boundaries
 
-### The backend:
-- Enforces all rules
-- Validates all mutations
-- Owns all persistent state
-- Resolves identity and permissions
-- Aggregates historical data
+### The backend does:
+- Enforce all rules
+- Validate all state changes
+- Own all persistent data
+- Resolve identity and permissions
+- Aggregate historical data
 
-### The backend does NOT:
+### The backend does not:
 - Render UI
 - Store presentation state
-- Assume client correctness
+- Trust client-side validation
 - Delegate authority to external services
 
 All clients are treated as untrusted.
@@ -197,20 +198,29 @@ All clients are treated as untrusted.
 ## System Positioning
 
 This backend exists to:
-- Guarantee competitive integrity
-- Preserve historical accuracy
-- Provide secure, auditable administration
-- Coordinate multiple client surfaces safely
+- Protect competitive integrity
+- Preserve accurate historical data
+- Provide safe administrative tooling
+- Coordinate multiple clients reliably
 
-It is intentionally strict, explicit, and authoritative.
+It is intentionally strict and explicit by design.
 
 ---
 
 ## Related Systems
 
-Cipher PvP operates as a coordinated ecosystem:
+Cipher PvP also includes:
 
-- **Frontend Web Client** — Presentation layer
-- **Discord Bot** — Match ingestion and automation
+- **Frontend Web Client** — User-facing interface  
+- **Discord Bot** — Match ingestion and automation  
 
-This repository defines the **rules and reality** those systems depend on.
+This repository defines the rules and data those systems depend on.
+
+---
+
+## License
+
+This project is licensed under the **MIT License**.
+
+This license applies to the backend implementation.  
+Client applications are covered by their own licenses.
