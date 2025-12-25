@@ -1,7 +1,6 @@
 import { Router, Request, Response, NextFunction } from "express";
 import passport from "passport";
-import { Strategy as DiscordStrategy } from "passport-discord";
-import { Profile as PassportProfile } from "passport";
+import { Strategy as DiscordStrategy, Profile as DiscordProfile } from "passport-discord";
 import { pool } from "../db"; 
 import dotenv from "dotenv";
 import rateLimit from "express-rate-limit";
@@ -19,23 +18,14 @@ type DiscordUser = {
 };
 
 /* ───── Set up Passport serialization ───── */
-passport.serializeUser((user: any, done) => {
+passport.serializeUser((user: any, done: (err: any, user?: any) => void) => {
   done(null, user);
 });
 
-passport.deserializeUser((obj: any, done) => {
+passport.deserializeUser((obj: any, done: (err: any, user?: any) => void) => {
   done(null, obj as DiscordUser);
 });
 
-interface DiscordProfile extends PassportProfile {
-  id: string;
-  username?: string;
-  discriminator?: string;
-  avatar?: string | null;
-  _json?: {
-    avatar?: string | null;
-  };
-}
 
 /* ───── Configure Discord Strategy ───── */
 passport.use(
@@ -49,18 +39,19 @@ passport.use(
     async (
       _accessToken: string,
       _refreshToken: string,
-      profile: DiscordProfile,
+      profile: any,
       done: (error: any, user?: any) => void
     ) => {
-      const globalName = (profile as any).global_name ?? null;
+      const globalName = profile.global_name ?? null;
 
       const user: DiscordUser = {
         id: profile.id,
-        username: profile.displayName ?? profile.username ?? "Unknown",
+        username: profile.username ?? globalName ?? "Unknown",
         discriminator: profile.discriminator ?? "0000",
-        avatar: profile.avatar ?? profile._json?.avatar ?? null,
+        avatar: profile.avatar ?? null,
         global_name: globalName,
       };
+
 
       // ✅ Upsert to DB
       try {
@@ -92,7 +83,11 @@ const loginLimiter = rateLimit({
 
 /* ───── Routes ───── */
 
-router.get("/discord", loginLimiter, (req, res, next) => {
+router.get(
+  "/discord",
+  loginLimiter,
+  (req: Request, res: Response, next: NextFunction) => {
+
   const redirect = req.query.redirect as string | undefined;
 
   try {
@@ -142,7 +137,8 @@ router.get(
     )(req, res, next);
   }
 );
-router.get("/auth/failure", (req, res) => {
+router.get("/auth/failure", (_req: Request, res: Response) => {
+
   res.send("OAuth failure occurred — check server logs for details.");
 });
 

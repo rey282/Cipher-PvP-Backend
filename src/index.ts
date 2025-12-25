@@ -4,7 +4,7 @@ import dotenv from 'dotenv';
 import rateLimit from 'express-rate-limit';
 import helmet from 'helmet';
 import session from 'express-session';
-import type { Request, Response } from "express";
+import type { Request, Response, NextFunction } from "express";
 import pgSession from 'connect-pg-simple';
 import passport from 'passport';
 
@@ -133,12 +133,13 @@ app.use(helmet());
 app.use(express.json({ limit: '1mb' }));
 
 /* ───────── Apply global limiter EXCEPT drafting ───────── */
-app.use((req, res, next) => {
+app.use((req: Request, res: Response, next: NextFunction) => {
   if (DRAFT_ROOT_RE.test(req.path) || SSE_STREAM_RE.test(req.path)) {
     return next();
   }
   return globalLimiter(req, res, next);
 });
+
 
 /* ───────── Scoped rate limiters for DRAFTING only ───────── */
 app.use("/api/hsr/matches/recent", publicLimiter);
@@ -197,7 +198,7 @@ app.get("/healthz", async (_req, res) => {
 });
 
 /* ───────── 404 fallback ───────── */
-app.use((_, res, _next) => {
+app.use((_req: Request, res: Response, _next: NextFunction) => {
   res.status(404).json({ error: 'Not Found' });
 });
 
