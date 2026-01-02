@@ -69,6 +69,37 @@ function sanitizeName(name: any): string | null {
   return t;
 }
 
+/* ───────────── ZZZ Team Preset helpers ───────────── */
+
+type ZzzPresetSlot = {
+  characterId: string;
+  mindscape: number;     // 0..6
+  wengineId: string;     // "" allowed
+  refinement: number;   // 1..5
+};
+
+function isZzzSlot(x: any): x is ZzzPresetSlot {
+  return x &&
+    typeof x.characterId === "string" && x.characterId.length > 0 &&
+    Number.isInteger(x.mindscape) && x.mindscape >= 0 && x.mindscape <= 6 &&
+    typeof x.wengineId === "string" &&
+    Number.isInteger(x.refinement) && x.refinement >= 1 && x.refinement <= 5;
+}
+
+function isSlotsArray3(x: any): x is ZzzPresetSlot[] {
+  return Array.isArray(x) && x.length === 3 && x.every(isZzzSlot);
+}
+
+function parseExpectedScoreInput(v: any): number | null {
+  if (v === null) return null;
+  const n = Number(v);
+  if (!Number.isFinite(n) || !Number.isInteger(n) || n < 1 || n > 65000) {
+    return NaN as any;
+  }
+  return n;
+}
+
+
 /* ─────────────────────────────────────────────────────────
    GET /api/players
    ───────────────────────────────────────────────────────── */
@@ -682,6 +713,400 @@ router.delete("/api/player/:id/presets", async (req, res) => {
     await pool.query("ROLLBACK").catch(() => {});
     console.error("DELETE ALL presets error", err);
     res.status(500).json({ error: "Failed to delete all presets" });
+  }
+});
+
+// GET /api/zzz/player/:id/presets
+router.get("/api/zzz/player/:id/presets", async (req, res) => {
+  const userId = req.params.id;
+  if (!(await ensureSelfOrSuperuser(req, res, userId))) return;
+
+  try {
+    const { rows: presets } = await pool.query(
+      `SELECT id, name, description, expected_score, updated_at
+         FROM zzz_team_presets
+        WHERE user_id = $1
+        ORDER BY updated_at DESC`,
+      [userId]
+    );
+
+    if (!presets.length) {
+      res.json({ presets: [] });
+      return;
+    }
+
+    const ids = presets.map(p => p.id);
+    const { rows: slots } = await pool.query(
+      `SELECT preset_id, slot_index, character_id, mindscape, wengine_id, refinement
+         FROM zzz_team_preset_slots
+        WHERE preset_id = ANY($1::text[])`,
+      [ids]
+    );
+
+    const byPreset: Record<string, any[]> = {};
+    for (const s of slots) (byPreset[s.preset_id] ||= []).push(s);
+
+    const out = presets.map(p => ({
+      id: p.id,
+      name: p.name,
+      description: p.description || "",
+      updated_at: p.updated_at,
+      expectedScore: p.expected_score,
+      slots: (byPreset[p.id] || [])
+        .sort((a, b) => a.slot_index - b.slot_index)
+        .map(s => ({
+          characterId: s.character_id,
+          mindscape: s.mindscape,
+          wengineId: s.wengine_id,
+          refinement: s.refinement,
+        })),
+    }));
+
+    res.json({ presets: out });
+  } catch (err) {
+    console.error("GET ZZZ presets error", err);
+    res.status(500).json({ error: "Failed to fetch ZZZ presets" });
+  }
+});
+
+// POST /api/zzz/player/:id/presets
+router.post("/api/zzz/player/:id/presets", (req, res) => {
+  const userId = req.params.id;
+
+  ensureSelfOrSuperuser(req, res, userId)
+    .then(async ok => {
+      if (!ok) return;
+
+      const name = sanitizeName(req.body?.name);
+      const slots = req.body?.slots;
+      const rawDesc = typeof req.body?.description === "string" ? req.body.description : "";
+      const description = rawDesc.trim();
+
+      if (!name) {
+        res.status(400).json({ error: "Invalid name" });
+        return;
+      }
+      if (description.length > MAX_PRESET_DESC_LEN) {
+        res.status(400).json({ error: "Description too long" });
+        return;
+      }
+      if (!isSlotsArray3(slots)) {
+        res.status(400).json({ error: "slots must be an array of 3 valid ZZZ slot objects" });
+        return;
+      }
+
+      const expectedScoreRaw = req.body?.expectedScore;
+      let expectedScore: number | null | undefined = undefined;
+      if (expectedScoreRaw !== undefined) {
+        expectedScore = parseExpectedScoreInput(expectedScoreRaw);
+        if (Number.isNaN(expectedScore as any)) {
+          res.status(400).json({ error: "Invalid expectedScore (1–65000 or null)" });
+          return;
+        }
+      }
+
+      const { rows } = await pool.query(
+        `SELECT COUNT(*)::int AS cnt FROM zzz_team_presets WHERE user_id = $1`,
+        [userId]
+      );
+      if ((rows[0]?.cnt ?? 0) >= 50) {
+        res.status(409).json({ error: "Max presets reached (50)" });
+        return;
+      }
+
+      try {
+        await pool.query("BEGIN");
+
+        const { rows: created } = await pool.query(
+          `INSERT INTO zzz_team_presets (user_id, name, description, expected_score)
+           VALUES ($1, $2, $3, $4)
+           RETURNING id, name, description, expected_score, updated_at`,
+          [userId, name, description || "", expectedScore ?? null]
+        );
+
+        const presetId = created[0].id;
+        const values: any[] = [];
+        const placeholders: string[] = [];
+
+        for (let i = 0; i < 3; i++) {
+          const s = slots[i];
+          values.push(presetId, i, s.characterId, s.mindscape, s.wengineId, s.refinement);
+          const base = i * 6;
+          placeholders.push(
+            `($${base+1}, $${base+2}, $${base+3}, $${base+4}, $${base+5}, $${base+6})`
+          );
+        }
+
+        await pool.query(
+          `INSERT INTO zzz_team_preset_slots
+           (preset_id, slot_index, character_id, mindscape, wengine_id, refinement)
+           VALUES ${placeholders.join(",")}`,
+          values
+        );
+
+        await pool.query("COMMIT");
+
+        res.status(201).json({
+          preset: {
+            id: presetId,
+            name: created[0].name,
+            description: created[0].description,
+            updated_at: created[0].updated_at,
+            expectedScore: created[0].expected_score,
+            slots,
+          },
+        });
+      } catch (err) {
+        await pool.query("ROLLBACK").catch(() => {});
+        console.error("POST ZZZ preset error", err);
+        res.status(500).json({ error: "Failed to create ZZZ preset" });
+      }
+    })
+    .catch(err => {
+      console.error("POST ZZZ preset outer error", err);
+      res.status(500).json({ error: "Failed to create ZZZ preset" });
+    });
+});
+
+// PATCH /api/zzz/player/:id/presets/:presetId
+router.patch("/api/zzz/player/:id/presets/:presetId", async (req, res) => {
+  const userId = req.params.id;
+  const presetId = req.params.presetId;
+
+  if (!(await ensureSelfOrSuperuser(req, res, userId))) return;
+
+  // verify ownership
+  const { rows: own } = await pool.query(
+    `SELECT user_id FROM zzz_team_presets WHERE id = $1`,
+    [presetId]
+  );
+  if (own.length === 0 || own[0].user_id !== userId) {
+    res.status(404).json({ error: "Preset not found" });
+    return;
+  }
+
+  const expectedScoreRaw = req.body?.expectedScore;
+  let expectedScoreProvided = false;
+  let expectedScore: number | null = null;
+
+  if (expectedScoreRaw !== undefined) {
+    expectedScoreProvided = true;
+    expectedScore = parseExpectedScoreInput(expectedScoreRaw);
+    if (Number.isNaN(expectedScore as any)) {
+      res.status(400).json({ error: "Invalid expectedScore (1–65000 or null)" });
+      return;
+    }
+  }
+
+  const nameRaw = req.body?.name;
+  const slots = req.body?.slots;
+  const descriptionRaw = req.body?.description;
+
+  const name = nameRaw === undefined ? undefined : sanitizeName(nameRaw);
+  if (nameRaw !== undefined && !name) {
+    res.status(400).json({ error: "Invalid name" });
+    return;
+  }
+
+  if (slots !== undefined && !isSlotsArray3(slots)) {
+    res.status(400).json({
+      error: "slots must be an array of 3 valid ZZZ slot objects",
+    });
+    return;
+  }
+
+  const description =
+    descriptionRaw === undefined ? undefined : String(descriptionRaw).trim();
+
+  if (typeof description === "string" && description.length > MAX_PRESET_DESC_LEN) {
+    res.status(400).json({
+      error: `Description too long (max ${MAX_PRESET_DESC_LEN} characters)`,
+    });
+    return;
+  }
+
+  try {
+    await pool.query("BEGIN");
+
+    if (name !== undefined) {
+      await pool.query(
+        `UPDATE zzz_team_presets SET name = $1, updated_at = now() WHERE id = $2`,
+        [name, presetId]
+      );
+    }
+
+    if (description !== undefined) {
+      await pool.query(
+        `UPDATE zzz_team_presets SET description = $1, updated_at = now() WHERE id = $2`,
+        [description, presetId]
+      );
+    }
+
+    if (expectedScoreProvided) {
+      await pool.query(
+        `UPDATE zzz_team_presets SET expected_score = $1, updated_at = now() WHERE id = $2`,
+        [expectedScore, presetId]
+      );
+    }
+
+    if (slots !== undefined) {
+      await pool.query(
+        `DELETE FROM zzz_team_preset_slots WHERE preset_id = $1`,
+        [presetId]
+      );
+
+      const values: any[] = [];
+      const placeholders: string[] = [];
+
+      for (let i = 0; i < 3; i++) {
+        const s = slots[i];
+        values.push(
+          presetId,
+          i,
+          s.characterId,
+          s.mindscape,
+          s.wengineId,
+          s.refinement
+        );
+        const base = i * 6;
+        placeholders.push(
+          `($${base + 1}, $${base + 2}, $${base + 3}, $${base + 4}, $${base + 5}, $${base + 6})`
+        );
+      }
+
+      await pool.query(
+        `INSERT INTO zzz_team_preset_slots
+          (preset_id, slot_index, character_id, mindscape, wengine_id, refinement)
+         VALUES ${placeholders.join(",")}`,
+        values
+      );
+
+      await pool.query(
+        `UPDATE zzz_team_presets SET updated_at = now() WHERE id = $1`,
+        [presetId]
+      );
+    }
+
+    await pool.query("COMMIT");
+
+    const { rows } = await pool.query(
+      `SELECT p.id AS preset_id,
+              p.name,
+              p.description,
+              p.expected_score,
+              p.updated_at,
+              s.slot_index,
+              s.character_id,
+              s.mindscape,
+              s.wengine_id,
+              s.refinement
+         FROM zzz_team_presets p
+    LEFT JOIN zzz_team_preset_slots s ON s.preset_id = p.id
+        WHERE p.id = $1
+        ORDER BY s.slot_index ASC`,
+      [presetId]
+    );
+
+    if (!rows.length) {
+      res.status(404).json({ error: "Preset not found" });
+      return;
+    }
+
+    const slotsOut = rows
+      .filter(r => r.slot_index !== null)
+      .sort((a, b) => a.slot_index - b.slot_index)
+      .map(r => ({
+        characterId: r.character_id,
+        mindscape: r.mindscape,
+        wengineId: r.wengine_id,
+        refinement: r.refinement,
+      }));
+
+    res.json({
+      preset: {
+        id: rows[0].preset_id,
+        name: rows[0].name,
+        description: rows[0].description || "",
+        updated_at: rows[0].updated_at,
+        expectedScore: rows[0].expected_score,
+        slots: slotsOut,
+      },
+    });
+  } catch (err) {
+    await pool.query("ROLLBACK").catch(() => {});
+    console.error("PATCH ZZZ preset error", err);
+    if ((err as any)?.code === "23505") {
+      res.status(409).json({ error: "A preset with this name already exists." });
+    } else {
+      res.status(500).json({ error: "Failed to update ZZZ preset" });
+    }
+  }
+});
+
+// DELETE /api/zzz/player/:id/presets/:presetId
+router.delete("/api/zzz/player/:id/presets/:presetId", async (req, res) => {
+  const userId = req.params.id;
+  const presetId = req.params.presetId;
+
+  if (!(await ensureSelfOrSuperuser(req, res, userId))) return;
+
+  try {
+    // verify ownership
+    const { rows: own } = await pool.query(
+      `SELECT user_id FROM zzz_team_presets WHERE id = $1`,
+      [presetId]
+    );
+    if (own.length === 0 || own[0].user_id !== userId) {
+      res.status(404).json({ error: "Preset not found" });
+      return;
+    }
+
+    await pool.query(
+      `DELETE FROM zzz_team_presets WHERE id = $1`,
+      [presetId]
+    );
+
+    res.status(204).end();
+  } catch (err) {
+    console.error("DELETE ZZZ preset error", err);
+    res.status(500).json({ error: "Failed to delete ZZZ preset" });
+  }
+});
+
+// DELETE /api/zzz/player/:id/presets
+router.delete("/api/zzz/player/:id/presets", async (req, res) => {
+  const userId = req.params.id;
+
+  if (!(await ensureSelfOrSuperuser(req, res, userId))) return;
+
+  try {
+    await pool.query("BEGIN");
+
+    await pool.query(
+      `
+      DELETE FROM zzz_team_preset_slots
+      USING zzz_team_presets p
+      WHERE zzz_team_preset_slots.preset_id = p.id
+        AND p.user_id = $1
+      `,
+      [userId]
+    );
+
+    const { rows } = await pool.query(
+      `DELETE FROM zzz_team_presets WHERE user_id = $1 RETURNING id`,
+      [userId]
+    );
+
+    await pool.query("COMMIT");
+
+    res.json({
+      deleted: rows.length,
+      presetIds: rows.map(r => r.id),
+    });
+  } catch (err) {
+    await pool.query("ROLLBACK").catch(() => {});
+    console.error("DELETE ALL ZZZ presets error", err);
+    res.status(500).json({ error: "Failed to delete all ZZZ presets" });
   }
 });
 
