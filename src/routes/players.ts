@@ -191,11 +191,41 @@ router.get("/api/players", async (req, res) => {
   }
 });
 
-/* ─────────────────────────────────────────────────────────
-   GET /api/player/:id
-   ───────────────────────────────────────────────────────── */
 router.get("/api/player/:id", async (req, res) => {
   const { id } = req.params;
+
+  // ── lightweight mode for landing page / team popups ──
+  // NOTE: query params can be string | string[] | undefined
+  const lite = String(req.query.lite ?? "0") === "1";
+  if (lite) {
+    try {
+      const { rows } = await pool.query(
+        `
+        SELECT
+          d.discord_id,
+          d.username,
+          d.global_name,
+          d.avatar
+        FROM discord_usernames d
+        WHERE d.discord_id = $1
+        LIMIT 1;
+        `,
+        [id]
+      );
+
+      if (!rows.length) {
+        res.status(404).json({ error: "Player not found" });
+        return;
+      }
+
+      res.json(rows[0]);
+      return;
+    } catch (err) {
+      console.error("DB error (player lite)", err);
+      res.status(500).json({ error: "Failed to fetch player" });
+      return;
+    }
+  }
   const seasonKey = String(req.query.season ?? "players") as SeasonKey;
   const season = seasonFromQuery(seasonKey);
   const cacheKey = `player_profile_${id}_season_${seasonKey}`;
@@ -272,6 +302,7 @@ router.get("/api/player/:id", async (req, res) => {
     res.status(500).json({ error: "Failed to fetch player" });
   }
 });
+
 
 /* ─────────────────────────────────────────────────────────
    PATCH /api/player/:id (self or admin)
