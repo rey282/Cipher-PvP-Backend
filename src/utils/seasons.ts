@@ -23,6 +23,7 @@ export const CHARACTER_TABLE_MAP: Record<string, string> = {
   "4": "characters_4",
   "5": "characters_5",
   "6": "characters_6", 
+  "7": "characters_7",
   // add more as needed
 };
 
