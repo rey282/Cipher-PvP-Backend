@@ -35,6 +35,7 @@ passport.use(
       clientSecret: process.env.DISCORD_CLIENT_SECRET as string,
       callbackURL: process.env.DISCORD_REDIRECT_URI as string,
       scope: ["identify"],
+      state: true,
     },
     async (
       _accessToken: string,
@@ -53,7 +54,7 @@ passport.use(
       };
 
 
-      // ✅ Upsert to DB
+      // Upsert to DB
       try {
         await pool.query(
           `INSERT INTO discord_usernames (discord_id, username, global_name, avatar)
@@ -109,34 +110,46 @@ router.get(
 });
 
 
-router.get(
-  "/discord/callback",
-  (req: Request, res: Response, next: NextFunction) => {
-    passport.authenticate(
-      "discord",
-      (err: any, user: any, info: any) => {
-        if (err) {
-          console.error("OAuth error:", err);
-          return res.status(500).json({ error: "OAuth failed", details: err.message });
-        }
-        if (!user) {
-          console.warn("OAuth failed, info:", info);
-          return res.redirect("/auth/failure");
-        }
-        req.logIn(user, (loginErr: any) => {
-          if (loginErr) {
-            console.error("Login error:", loginErr);
-            return next(loginErr);
-          }
-          const session = req.session as typeof req.session & { oauthRedirect?: string };
-          const redirect = session.oauthRedirect;
-          if (redirect) delete session.oauthRedirect;
-          res.redirect(redirect || process.env.FRONTEND_HOME_URL!);
-        });
-      }
-    )(req, res, next);
+router.get("/discord/callback", (req: Request, res: Response, next: NextFunction) => {
+  const s = req.session as any;
+
+  // prevent exchanging token more than once if callback is hit multiple times
+  if (s._oauthCallbackHandled) {
+    return res.status(429).send("OAuth callback already handled. Please retry login.");
   }
-);
+  s._oauthCallbackHandled = true;
+
+  passport.authenticate("discord", (err: any, user: any, info: any) => {
+    if (err) {
+      console.error("OAuth error:", err);
+      // allow retry if it failed
+      delete s._oauthCallbackHandled;
+      return res.status(500).json({ error: "OAuth failed", details: err.message });
+    }
+
+    if (!user) {
+      delete s._oauthCallbackHandled;
+      console.warn("OAuth failed, info:", info);
+      return res.redirect("/auth/failure");
+    }
+
+    req.logIn(user, (loginErr: any) => {
+      if (loginErr) {
+        delete s._oauthCallbackHandled;
+        console.error("Login error:", loginErr);
+        return next(loginErr);
+      }
+
+      const redirect = (req.session as any).oauthRedirect;
+      if (redirect) delete (req.session as any).oauthRedirect;
+
+      // clear one-shot flag after success so future logins work
+      delete (req.session as any)._oauthCallbackHandled;
+
+      res.redirect(redirect || process.env.FRONTEND_HOME_URL!);
+    });
+  })(req, res, next);
+});
 router.get("/auth/failure", (_req: Request, res: Response) => {
 
   res.send("OAuth failure occurred — check server logs for details.");
