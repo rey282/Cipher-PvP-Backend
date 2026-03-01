@@ -113,9 +113,10 @@ router.get(
 router.get("/discord/callback", (req: Request, res: Response, next: NextFunction) => {
   const s = req.session as any;
 
-  // prevent exchanging token more than once if callback is hit multiple times
   if (s._oauthCallbackHandled) {
-    return res.status(429).send("OAuth callback already handled. Please retry login.");
+    const redirect = (req.session as any).oauthRedirect;
+    if (redirect) delete (req.session as any).oauthRedirect;
+    return res.redirect(redirect || process.env.FRONTEND_HOME_URL!);
   }
   s._oauthCallbackHandled = true;
 
